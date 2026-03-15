@@ -110,7 +110,17 @@ ALTER TABLE exercise_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE meal_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE progress_logs ENABLE ROW LEVEL SECURITY;
 
--- Policies
+-- Policies (drop if exist, then recreate)
+DROP POLICY IF EXISTS "Users can view own profile" ON profiles;
+DROP POLICY IF EXISTS "Users can update own profile" ON profiles;
+DROP POLICY IF EXISTS "Users can insert own profile" ON profiles;
+DROP POLICY IF EXISTS "Users can manage own routines" ON workout_routines;
+DROP POLICY IF EXISTS "Users can manage own routine exercises" ON routine_exercises;
+DROP POLICY IF EXISTS "Users can manage own workout logs" ON workout_logs;
+DROP POLICY IF EXISTS "Users can manage own exercise logs" ON exercise_logs;
+DROP POLICY IF EXISTS "Users can manage own meals" ON meal_logs;
+DROP POLICY IF EXISTS "Users can manage own progress" ON progress_logs;
+
 CREATE POLICY "Users can view own profile" ON profiles FOR SELECT USING (auth.uid() = id);
 CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE USING (auth.uid() = id);
 CREATE POLICY "Users can insert own profile" ON profiles FOR INSERT WITH CHECK (auth.uid() = id);
