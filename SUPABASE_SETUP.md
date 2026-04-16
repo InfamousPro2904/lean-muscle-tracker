@@ -1,5 +1,28 @@
 # Supabase Setup Guide (Free Tier)
 
+## New: Feedback Table Migration (2026-04-14)
+
+Run `supabase/migrations/001_feedback.sql` in the Supabase SQL Editor to create
+the shared `feedback` and `feedback_upvotes` tables with RLS.
+
+After running the migration, enable Realtime on the `feedback` table:
+Supabase Dashboard > Realtime > Tables > toggle ON `feedback`
+
+Also add these two RPC functions to your schema for upvote counts:
+```sql
+CREATE OR REPLACE FUNCTION increment_feedback_upvotes(fid UUID)
+RETURNS VOID AS $$
+  UPDATE feedback SET upvotes = upvotes + 1 WHERE id = fid;
+$$ LANGUAGE SQL;
+
+CREATE OR REPLACE FUNCTION decrement_feedback_upvotes(fid UUID)
+RETURNS VOID AS $$
+  UPDATE feedback SET upvotes = GREATEST(0, upvotes - 1) WHERE id = fid;
+$$ LANGUAGE SQL;
+```
+
+---
+
 ## Step 1: Create Account
 1. Go to https://supabase.com
 2. Click "Start your project" → Sign up with **GitHub** (easiest)

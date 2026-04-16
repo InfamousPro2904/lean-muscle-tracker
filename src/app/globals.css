@@ -6,11 +6,11 @@
   :root {
     --background: #0a0a0a;
     --foreground: #fafafa;
-    --card: #141414;
-    --card-border: #262626;
-    --primary: #22c55e;
-    --primary-dark: #16a34a;
-    --accent: #3b82f6;
+    --card: #111111;
+    --card-border: #222222;
+    --primary: #3b82f6;
+    --primary-dark: #2563eb;
+    --accent: #f59e0b;
     --danger: #ef4444;
     --warning: #f59e0b;
     --muted: #737373;
@@ -38,55 +38,67 @@ body {
 }
 
 .card {
-  @apply bg-[#141414] border border-[#262626] rounded-xl p-6;
+  @apply bg-[#111111] border border-[#222222] rounded-2xl p-6;
 }
 
 .card-hover {
-  @apply bg-[#141414] border border-[#262626] rounded-xl p-6 transition-all duration-200 hover:border-[#3a3a3a] hover:shadow-lg;
+  @apply bg-[#111111] border border-[#222222] rounded-2xl p-6 transition-all duration-200 hover:border-[#333] hover:shadow-xl;
 }
 
 .btn-primary {
-  @apply bg-green-500 hover:bg-green-600 text-black font-semibold px-4 py-2 rounded-lg transition-colors;
+  @apply bg-blue-500 hover:bg-blue-600 text-white font-semibold px-4 py-2 rounded-xl transition-colors;
 }
 
 .btn-secondary {
-  @apply bg-[#262626] hover:bg-[#333] text-white px-4 py-2 rounded-lg transition-colors;
+  @apply bg-[#1e1e1e] hover:bg-[#2a2a2a] text-white px-4 py-2 rounded-xl transition-colors border border-[#2e2e2e];
 }
 
 .btn-danger {
-  @apply bg-red-500/20 hover:bg-red-500/30 text-red-400 px-4 py-2 rounded-lg transition-colors;
+  @apply bg-red-500/10 hover:bg-red-500/20 text-red-400 px-4 py-2 rounded-xl transition-colors;
+}
+
+.btn-amber {
+  @apply bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 font-semibold px-4 py-2 rounded-xl transition-colors border border-amber-500/20;
 }
 
 .input {
-  @apply bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:outline-none focus:border-green-500 focus:ring-1 focus:ring-green-500 transition-colors w-full;
+  @apply bg-[#161616] border border-[#2a2a2a] rounded-xl px-4 py-2.5 text-white placeholder-[#555] focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/50 transition-colors w-full;
 }
 
 .select {
-  @apply bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:outline-none focus:border-green-500 focus:ring-1 focus:ring-green-500 transition-colors w-full appearance-none cursor-pointer;
+  @apply bg-[#161616] border border-[#2a2a2a] rounded-xl px-4 py-2.5 text-white placeholder-[#555] focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/50 transition-colors w-full appearance-none cursor-pointer;
 }
 
 .badge {
-  @apply text-xs px-2 py-0.5 rounded-full font-medium;
+  @apply text-xs px-2.5 py-1 rounded-full font-medium;
 }
 
 .badge-green {
-  @apply text-xs px-2 py-0.5 rounded-full font-medium bg-green-500/20 text-green-400;
+  @apply text-xs px-2.5 py-1 rounded-full font-medium bg-emerald-500/15 text-emerald-400 border border-emerald-500/20;
 }
 
 .badge-blue {
-  @apply text-xs px-2 py-0.5 rounded-full font-medium bg-blue-500/20 text-blue-400;
+  @apply text-xs px-2.5 py-1 rounded-full font-medium bg-blue-500/15 text-blue-400 border border-blue-500/20;
+}
+
+.badge-amber {
+  @apply text-xs px-2.5 py-1 rounded-full font-medium bg-amber-500/15 text-amber-400 border border-amber-500/20;
 }
 
 .badge-yellow {
-  @apply text-xs px-2 py-0.5 rounded-full font-medium bg-yellow-500/20 text-yellow-400;
+  @apply text-xs px-2.5 py-1 rounded-full font-medium bg-yellow-500/15 text-yellow-400 border border-yellow-500/20;
 }
 
 .badge-red {
-  @apply text-xs px-2 py-0.5 rounded-full font-medium bg-red-500/20 text-red-400;
+  @apply text-xs px-2.5 py-1 rounded-full font-medium bg-red-500/15 text-red-400 border border-red-500/20;
+}
+
+.badge-purple {
+  @apply text-xs px-2.5 py-1 rounded-full font-medium bg-purple-500/15 text-purple-400 border border-purple-500/20;
 }
 
 .progress-bar {
-  @apply h-2 rounded-full bg-[#262626] overflow-hidden;
+  @apply h-2 rounded-full bg-[#222] overflow-hidden;
 }
 
 .progress-fill {
@@ -94,13 +106,74 @@ body {
 }
 
 .tab {
-  @apply px-4 py-2 text-sm font-medium rounded-lg transition-colors cursor-pointer;
+  @apply px-4 py-2 text-sm font-medium rounded-xl transition-colors cursor-pointer;
 }
 
 .tab-active {
-  @apply px-4 py-2 text-sm font-medium rounded-lg transition-colors cursor-pointer bg-green-500 text-black;
+  @apply px-4 py-2 text-sm font-medium rounded-xl transition-colors cursor-pointer bg-blue-500 text-white;
 }
 
 .tab-inactive {
-  @apply px-4 py-2 text-sm font-medium rounded-lg transition-colors cursor-pointer text-gray-400 hover:text-white hover:bg-[#262626];
+  @apply px-4 py-2 text-sm font-medium rounded-xl transition-colors cursor-pointer text-[#777] hover:text-white hover:bg-[#1e1e1e];
+}
+
+/* ── Muscle diagram animations ── */
+@keyframes muscle-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+@keyframes muscle-glow {
+  0%, 100% { filter: drop-shadow(0 0 4px rgba(59,130,246,0.4)); }
+  50% { filter: drop-shadow(0 0 10px rgba(59,130,246,0.8)); }
+}
+
+.muscle-active {
+  animation: muscle-pulse 2s ease-in-out infinite, muscle-glow 2s ease-in-out infinite;
+}
+
+/* ── Motion cue animations ── */
+@keyframes press-out {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(6px); }
+}
+
+@keyframes press-in {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(-6px); }
+}
+
+@keyframes pull-down {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(8px); }
+}
+
+@keyframes push-up {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+@keyframes curl-up {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-30deg); }
+}
+
+@keyframes hinge {
+  0%, 100% { transform: rotate(0deg); transform-origin: bottom center; }
+  50% { transform: rotate(-20deg); transform-origin: bottom center; }
+}
+
+@keyframes squat-down {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(10px); }
+}
+
+@keyframes rotate-out {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(25deg); }
+}
+
+/* ── Section divider ── */
+.section-label {
+  @apply text-xs font-semibold uppercase tracking-widest text-[#444] mb-3;
 }
