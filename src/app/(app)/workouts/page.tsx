@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { createClient } from '@/lib/supabase'
 import {
   WorkoutRoutine, RoutineExercise, WorkoutLog, ExerciseLog,
@@ -8,8 +8,10 @@ import {
 } from '@/lib/types'
 import {
   Dumbbell, Plus, Trash2, ChevronDown, ChevronUp,
-  Clock, Calendar, ClipboardList, History, Save, X, Loader2
+  Clock, Calendar, ClipboardList, History, Save, X, Loader2,
+  BookOpen, Check, Undo2, AlertTriangle
 } from 'lucide-react'
+import PresetPicker, { type PresetSelection } from '@/components/workouts/PresetPicker'
 
 type Tab = 'routines' | 'log' | 'history'
 
@@ -17,6 +19,14 @@ interface ExerciseLogEntry {
   exercise_name: string
   muscle_group: string
   sets: { set_number: number; reps: number | null; weight_kg: number | null }[]
+}
+
+// ── Undo state ────────────────────────────────────────────────────
+interface UndoPending {
+  label: string
+  countdown: number
+  restore: () => void
+  doDelete: () => Promise<void>
 }
 
 export default function WorkoutsPage() {
@@ -35,8 +45,10 @@ export default function WorkoutsPage() {
   })
   const [addingExerciseTo, setAddingExerciseTo] = useState<string | null>(null)
   const [newExercise, setNewExercise] = useState({
-    exercise_name: '', muscle_group: MUSCLE_GROUPS[0] as string, sets: 3, reps: '10', rest_seconds: 90, notes: ''
+    exercise_name: '', muscle_group: MUSCLE_GROUPS[0] as string,
+    sets: 3, reps: '10', rest_seconds: 90, notes: ''
   })
+  const [showPresetPicker, setShowPresetPicker] = useState(false)
 
   // ─── Log Workout State ───
   const [selectedRoutineId, setSelectedRoutineId] = useState<string>('')
@@ -51,14 +63,18 @@ export default function WorkoutsPage() {
   const [workoutLogs, setWorkoutLogs] = useState<WorkoutLog[]>([])
   const [expandedLog, setExpandedLog] = useState<string | null>(null)
 
+  // ─── Delete confirmation + undo ───
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [undoPending, setUndoPending] = useState<UndoPending | null>(null)
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const undoIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
   // ─── Auth ───
   useEffect(() => {
-    const getUser = async () => {
-      const { data: { user } } = await supabase.auth.getUser()
+    supabase.auth.getUser().then(({ data: { user } }) => {
       if (user) setUserId(user.id)
       setLoading(false)
-    }
-    getUser()
+    })
   }, [supabase.auth])
 
   // ─── Fetch Routines ───
@@ -110,16 +126,54 @@ export default function WorkoutsPage() {
   }, [userId, supabase])
 
   useEffect(() => {
-    if (userId) {
-      fetchRoutines()
-      fetchHistory()
-    }
+    if (userId) { fetchRoutines(); fetchHistory() }
   }, [userId, fetchRoutines, fetchHistory])
+
+  // Cleanup timers on unmount
+  useEffect(() => () => {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
+    if (undoIntervalRef.current) clearInterval(undoIntervalRef.current)
+  }, [])
+
+  // ─── Undo helpers ───
+  const clearUndoTimers = () => {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
+    if (undoIntervalRef.current) clearInterval(undoIntervalRef.current)
+  }
+
+  const scheduleDelete = (label: string, restore: () => void, doDelete: () => Promise<void>) => {
+    clearUndoTimers()
+    // flush any existing pending delete immediately
+    if (undoPending) { undoPending.doDelete() }
+
+    let cd = 5
+    const pending: UndoPending = { label, countdown: cd, restore, doDelete }
+    setUndoPending(pending)
+
+    undoIntervalRef.current = setInterval(() => {
+      cd -= 1
+      setUndoPending(p => p ? { ...p, countdown: cd } : null)
+      if (cd <= 0) clearInterval(undoIntervalRef.current!)
+    }, 1000)
+
+    undoTimerRef.current = setTimeout(async () => {
+      clearInterval(undoIntervalRef.current!)
+      await doDelete()
+      setUndoPending(null)
+    }, 5000)
+  }
+
+  const handleUndo = () => {
+    if (!undoPending) return
+    clearUndoTimers()
+    undoPending.restore()
+    setUndoPending(null)
+  }
 
   // ─── Routine CRUD ───
   const createRoutine = async () => {
     if (!userId || !newRoutine.name.trim()) return
-    const { error } = await supabase.from('workout_routines').insert({
+    await supabase.from('workout_routines').insert({
       user_id: userId,
       name: newRoutine.name,
       description: newRoutine.description || null,
@@ -127,17 +181,38 @@ export default function WorkoutsPage() {
       day_of_week: newRoutine.day_of_week,
       is_active: true,
     })
-    if (!error) {
-      setNewRoutine({ name: '', description: '', split_type: 'ppl', day_of_week: [] })
-      setShowCreateRoutine(false)
-      fetchRoutines()
-    }
+    setNewRoutine({ name: '', description: '', split_type: 'ppl', day_of_week: [] })
+    setShowCreateRoutine(false)
+    fetchRoutines()
   }
 
-  const deleteRoutine = async (routineId: string) => {
-    await supabase.from('routine_exercises').delete().eq('routine_id', routineId)
-    await supabase.from('workout_routines').delete().eq('id', routineId)
-    fetchRoutines()
+  /** Step 1: show inline confirm */
+  const requestDelete = (id: string) => {
+    setConfirmDeleteId(id)
+  }
+
+  /** Step 2a: user cancelled confirm */
+  const cancelDelete = () => setConfirmDeleteId(null)
+
+  /** Step 2b: user confirmed — optimistic remove + undo window */
+  const confirmDeleteRoutine = (routine: WorkoutRoutine) => {
+    setConfirmDeleteId(null)
+    setRoutines(prev => prev.filter(r => r.id !== routine.id))
+    if (expandedRoutine === routine.id) setExpandedRoutine(null)
+
+    scheduleDelete(
+      `"${routine.name}"`,
+      () => setRoutines(prev => {
+        const updated = [routine, ...prev.filter(r => r.id !== routine.id)]
+        return updated.sort((a, b) =>
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        )
+      }),
+      async () => {
+        await supabase.from('routine_exercises').delete().eq('routine_id', routine.id)
+        await supabase.from('workout_routines').delete().eq('id', routine.id)
+      }
+    )
   }
 
   const addExercise = async (routineId: string) => {
@@ -145,7 +220,7 @@ export default function WorkoutsPage() {
     const routine = routines.find(r => r.id === routineId)
     const sortOrder = (routine?.exercises?.length || 0) + 1
 
-    const { error } = await supabase.from('routine_exercises').insert({
+    await supabase.from('routine_exercises').insert({
       routine_id: routineId,
       exercise_name: newExercise.exercise_name,
       muscle_group: newExercise.muscle_group,
@@ -155,16 +230,31 @@ export default function WorkoutsPage() {
       notes: newExercise.notes || null,
       sort_order: sortOrder,
     })
-    if (!error) {
-      setNewExercise({ exercise_name: '', muscle_group: MUSCLE_GROUPS[0], sets: 3, reps: '10', rest_seconds: 90, notes: '' })
-      setAddingExerciseTo(null)
-      fetchRoutines()
-    }
+    setNewExercise({ exercise_name: '', muscle_group: MUSCLE_GROUPS[0], sets: 3, reps: '10', rest_seconds: 90, notes: '' })
+    setAddingExerciseTo(null)
+    fetchRoutines()
   }
 
-  const deleteExercise = async (exerciseId: string) => {
-    await supabase.from('routine_exercises').delete().eq('id', exerciseId)
-    fetchRoutines()
+  const confirmDeleteExercise = (exercise: RoutineExercise) => {
+    setConfirmDeleteId(null)
+    setRoutines(prev => prev.map(r =>
+      r.id === exercise.routine_id
+        ? { ...r, exercises: (r.exercises ?? []).filter(e => e.id !== exercise.id) }
+        : r
+    ))
+
+    scheduleDelete(
+      `"${exercise.exercise_name}"`,
+      () => setRoutines(prev => prev.map(r =>
+        r.id === exercise.routine_id
+          ? { ...r, exercises: [...(r.exercises ?? []).filter(e => e.id !== exercise.id), exercise]
+              .sort((a, b) => a.sort_order - b.sort_order) }
+          : r
+      )),
+      async () => {
+        await supabase.from('routine_exercises').delete().eq('id', exercise.id)
+      }
+    )
   }
 
   // ─── Log Workout Helpers ───
@@ -194,34 +284,28 @@ export default function WorkoutsPage() {
   const addCustomExerciseEntry = () => {
     setExerciseEntries(prev => [
       ...prev,
-      {
-        exercise_name: '',
-        muscle_group: MUSCLE_GROUPS[0],
-        sets: [{ set_number: 1, reps: null, weight_kg: null }],
-      },
+      { exercise_name: '', muscle_group: MUSCLE_GROUPS[0], sets: [{ set_number: 1, reps: null, weight_kg: null }] },
     ])
   }
 
   const addSetToEntry = (entryIdx: number) => {
-    setExerciseEntries(prev => prev.map((entry, i) => {
-      if (i !== entryIdx) return entry
-      return {
+    setExerciseEntries(prev => prev.map((entry, i) =>
+      i !== entryIdx ? entry : {
         ...entry,
         sets: [...entry.sets, { set_number: entry.sets.length + 1, reps: null, weight_kg: null }],
       }
-    }))
+    ))
   }
 
   const updateSetField = (entryIdx: number, setIdx: number, field: 'reps' | 'weight_kg', value: string) => {
-    setExerciseEntries(prev => prev.map((entry, i) => {
-      if (i !== entryIdx) return entry
-      return {
+    setExerciseEntries(prev => prev.map((entry, i) =>
+      i !== entryIdx ? entry : {
         ...entry,
         sets: entry.sets.map((s, si) =>
           si === setIdx ? { ...s, [field]: value === '' ? null : Number(value) } : s
         ),
       }
-    }))
+    ))
   }
 
   const updateEntryField = (entryIdx: number, field: 'exercise_name' | 'muscle_group', value: string) => {
@@ -235,12 +319,10 @@ export default function WorkoutsPage() {
   }
 
   const saveWorkoutLog = async () => {
-    if (!userId) return
+    if (!userId || exerciseEntries.length === 0) return
     const workoutName = selectedRoutineId
       ? routines.find(r => r.id === selectedRoutineId)?.name || 'Workout'
       : customWorkoutName || 'Custom Workout'
-
-    if (exerciseEntries.length === 0) return
 
     setSavingLog(true)
     const { data: logData, error: logError } = await supabase
@@ -256,10 +338,7 @@ export default function WorkoutsPage() {
       .select()
       .single()
 
-    if (logError || !logData) {
-      setSavingLog(false)
-      return
-    }
+    if (logError || !logData) { setSavingLog(false); return }
 
     const exerciseLogsToInsert: Omit<ExerciseLog, 'id'>[] = []
     exerciseEntries.forEach(entry => {
@@ -277,23 +356,42 @@ export default function WorkoutsPage() {
     })
 
     await supabase.from('exercise_logs').insert(exerciseLogsToInsert)
-
-    // Reset form
-    setSelectedRoutineId('')
-    setCustomWorkoutName('')
-    setLogDate(new Date().toISOString().split('T')[0])
-    setLogDuration('')
-    setLogNotes('')
-    setExerciseEntries([])
-    setSavingLog(false)
-    fetchHistory()
-    setActiveTab('history')
+    setSelectedRoutineId(''); setCustomWorkoutName('')
+    setLogDate(new Date().toISOString().split('T')[0]); setLogDuration('')
+    setLogNotes(''); setExerciseEntries([])
+    setSavingLog(false); fetchHistory(); setActiveTab('history')
   }
 
-  const deleteWorkoutLog = async (logId: string) => {
-    await supabase.from('exercise_logs').delete().eq('workout_log_id', logId)
-    await supabase.from('workout_logs').delete().eq('id', logId)
-    fetchHistory()
+  const confirmDeleteLog = (log: WorkoutLog) => {
+    setConfirmDeleteId(null)
+    setWorkoutLogs(prev => prev.filter(l => l.id !== log.id))
+    if (expandedLog === log.id) setExpandedLog(null)
+
+    scheduleDelete(
+      `"${log.workout_name}"`,
+      () => setWorkoutLogs(prev => {
+        const updated = [log, ...prev.filter(l => l.id !== log.id)]
+        return updated.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+      }),
+      async () => {
+        await supabase.from('exercise_logs').delete().eq('workout_log_id', log.id)
+        await supabase.from('workout_logs').delete().eq('id', log.id)
+      }
+    )
+  }
+
+  // ─── Preset picker callback ───
+  const handlePresetSelect = (sel: PresetSelection, routineId: string) => {
+    setShowPresetPicker(false)
+    setNewExercise({
+      exercise_name: sel.exercise_name,
+      muscle_group: sel.muscle_group,
+      sets: sel.sets,
+      reps: sel.reps,
+      rest_seconds: sel.rest_seconds,
+      notes: sel.notes,
+    })
+    setAddingExerciseTo(routineId)
   }
 
   // ─── Day Toggle ───
@@ -309,30 +407,30 @@ export default function WorkoutsPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
-        <Loader2 className="w-8 h-8 text-green-500 animate-spin" />
+        <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
       </div>
     )
   }
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    <div className="max-w-5xl mx-auto space-y-6 pb-20">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold flex items-center gap-3">
-            <Dumbbell className="w-7 h-7 text-green-500" />
-            Workouts
-          </h1>
-          <p className="text-gray-500 mt-1">Plan, log, and track your training</p>
+      <div>
+        <div className="flex items-center gap-2.5 mb-1">
+          <div className="w-8 h-8 rounded-xl bg-blue-500/12 flex items-center justify-center">
+            <Dumbbell className="w-4 h-4 text-blue-400" />
+          </div>
+          <h1 className="text-2xl font-bold tracking-tight">Workouts</h1>
         </div>
+        <p className="text-[#666] text-sm">Plan, log, and track your training</p>
       </div>
 
       {/* Tabs */}
       <div className="flex gap-2">
         {([
           { key: 'routines' as Tab, label: 'My Routines', icon: ClipboardList },
-          { key: 'log' as Tab, label: 'Log Workout', icon: Dumbbell },
-          { key: 'history' as Tab, label: 'Workout History', icon: History },
+          { key: 'log' as Tab,      label: 'Log Workout',  icon: Dumbbell },
+          { key: 'history' as Tab,  label: 'History',      icon: History },
         ]).map(({ key, label, icon: Icon }) => (
           <button
             key={key}
@@ -366,7 +464,7 @@ export default function WorkoutsPage() {
               <h3 className="text-lg font-semibold">New Routine</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm text-gray-400 mb-1">Routine Name</label>
+                  <label className="block text-sm text-[#666] mb-1">Routine Name</label>
                   <input
                     className="input"
                     placeholder="e.g., Push Day A"
@@ -375,7 +473,7 @@ export default function WorkoutsPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm text-gray-400 mb-1">Split Type</label>
+                  <label className="block text-sm text-[#666] mb-1">Split Type</label>
                   <select
                     className="select"
                     value={newRoutine.split_type}
@@ -388,7 +486,7 @@ export default function WorkoutsPage() {
                 </div>
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Description (optional)</label>
+                <label className="block text-sm text-[#666] mb-1">Description (optional)</label>
                 <input
                   className="input"
                   placeholder="Quick description..."
@@ -397,16 +495,16 @@ export default function WorkoutsPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-2">Scheduled Days</label>
+                <label className="block text-sm text-[#666] mb-2">Scheduled Days</label>
                 <div className="flex gap-2 flex-wrap">
                   {DAYS_OF_WEEK.map((day, idx) => (
                     <button
                       key={day}
                       onClick={() => toggleDay(idx)}
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                      className={`px-3 py-1.5 rounded-xl text-sm font-medium transition-all ${
                         newRoutine.day_of_week.includes(idx)
-                          ? 'bg-green-500 text-black'
-                          : 'bg-[#262626] text-gray-400 hover:bg-[#333]'
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-[#1a1a1a] text-[#666] hover:bg-[#222] border border-[#252525]'
                       }`}
                     >
                       {day}
@@ -420,14 +518,15 @@ export default function WorkoutsPage() {
             </div>
           )}
 
-          {/* Routines List */}
+          {/* Empty state */}
           {routines.length === 0 && !showCreateRoutine && (
             <div className="card text-center py-12">
-              <Dumbbell className="w-12 h-12 text-gray-600 mx-auto mb-3" />
-              <p className="text-gray-400">No routines yet. Create one to get started!</p>
+              <Dumbbell className="w-12 h-12 text-[#333] mx-auto mb-3" />
+              <p className="text-[#555]">No routines yet. Create one to get started!</p>
             </div>
           )}
 
+          {/* Routines List */}
           {routines.map(routine => (
             <div key={routine.id} className="card">
               <div className="flex items-start justify-between">
@@ -437,11 +536,11 @@ export default function WorkoutsPage() {
                 >
                   <div className="flex items-center gap-3">
                     <h3 className="font-semibold text-lg">{routine.name}</h3>
-                    <span className="badge-green">
+                    <span className="badge badge-blue">
                       {SPLIT_TYPES.find(s => s.value === routine.split_type)?.label || routine.split_type}
                     </span>
                   </div>
-                  <div className="flex items-center gap-4 mt-2 text-sm text-gray-400">
+                  <div className="flex items-center gap-4 mt-2 text-sm text-[#666]">
                     <span className="flex items-center gap-1">
                       <Calendar className="w-3.5 h-3.5" />
                       {routine.day_of_week.map(d => DAYS_OF_WEEK[d]).join(', ') || 'No days set'}
@@ -452,53 +551,83 @@ export default function WorkoutsPage() {
                     </span>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
+
+                {/* Expand + Delete controls */}
+                <div className="flex items-center gap-1">
                   <button
                     onClick={() => setExpandedRoutine(expandedRoutine === routine.id ? null : routine.id)}
-                    className="text-gray-500 hover:text-white p-1"
+                    className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-[#1e1e1e] transition-all"
                   >
-                    {expandedRoutine === routine.id ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
+                    {expandedRoutine === routine.id
+                      ? <ChevronUp className="w-4 h-4" />
+                      : <ChevronDown className="w-4 h-4" />}
                   </button>
-                  <button
-                    onClick={() => deleteRoutine(routine.id)}
-                    className="text-gray-500 hover:text-red-400 p-1"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+
+                  {confirmDeleteId === routine.id ? (
+                    <InlineConfirm
+                      label="Delete routine?"
+                      onConfirm={() => confirmDeleteRoutine(routine)}
+                      onCancel={cancelDelete}
+                    />
+                  ) : (
+                    <button
+                      onClick={() => requestDelete(routine.id)}
+                      className="text-[#555] hover:text-red-400 p-1.5 rounded-lg hover:bg-red-500/8 transition-all"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
                 </div>
               </div>
 
               {/* Expanded Exercises */}
               {expandedRoutine === routine.id && (
-                <div className="mt-4 pt-4 border-t border-[#262626] space-y-3">
+                <div className="mt-4 pt-4 border-t border-[#1e1e1e] space-y-3">
                   {routine.exercises && routine.exercises.length > 0 ? (
                     routine.exercises.map((ex, idx) => (
-                      <div key={ex.id} className="flex items-center justify-between bg-[#1a1a1a] rounded-lg px-4 py-3">
+                      <div key={ex.id} className="flex items-center justify-between bg-[#161616] border border-[#1e1e1e] rounded-xl px-4 py-3">
                         <div className="flex items-center gap-4">
-                          <span className="text-gray-600 text-sm font-mono w-6">{idx + 1}.</span>
+                          <span className="text-[#444] text-sm font-mono w-6">{idx + 1}.</span>
                           <div>
-                            <p className="font-medium">{ex.exercise_name}</p>
-                            <p className="text-sm text-gray-500">
-                              {ex.muscle_group} &middot; {ex.sets} sets x {ex.reps} reps &middot; {ex.rest_seconds}s rest
+                            <p className="font-medium text-sm">{ex.exercise_name}</p>
+                            <p className="text-xs text-[#555] mt-0.5">
+                              {ex.muscle_group} · {ex.sets} sets × {ex.reps} reps · {ex.rest_seconds}s rest
                             </p>
                           </div>
                         </div>
-                        <button
-                          onClick={() => deleteExercise(ex.id)}
-                          className="text-gray-600 hover:text-red-400 p-1"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {confirmDeleteId === ex.id ? (
+                          <InlineConfirm
+                            label="Remove?"
+                            onConfirm={() => confirmDeleteExercise(ex)}
+                            onCancel={cancelDelete}
+                          />
+                        ) : (
+                          <button
+                            onClick={() => requestDelete(ex.id)}
+                            className="text-[#444] hover:text-red-400 p-1.5 rounded-lg hover:bg-red-500/8 transition-all"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     ))
                   ) : (
-                    <p className="text-gray-500 text-sm">No exercises added yet.</p>
+                    <p className="text-[#555] text-sm">No exercises added yet.</p>
                   )}
 
                   {/* Add Exercise Form */}
                   {addingExerciseTo === routine.id ? (
-                    <div className="bg-[#1a1a1a] rounded-lg p-4 space-y-3">
-                      <h4 className="text-sm font-semibold text-gray-300">Add Exercise</h4>
+                    <div className="bg-[#161616] border border-[#222] rounded-xl p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-sm font-semibold text-[#ccc]">Add Exercise</h4>
+                        <button
+                          onClick={() => { setShowPresetPicker(true) }}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 text-xs font-medium transition-all border border-blue-500/20"
+                        >
+                          <BookOpen className="w-3.5 h-3.5" />
+                          Browse Presets
+                        </button>
+                      </div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <input
                           className="input"
@@ -518,7 +647,7 @@ export default function WorkoutsPage() {
                       </div>
                       <div className="grid grid-cols-3 gap-3">
                         <div>
-                          <label className="block text-xs text-gray-500 mb-1">Sets</label>
+                          <label className="block text-xs text-[#555] mb-1">Sets</label>
                           <input
                             type="number"
                             className="input"
@@ -527,16 +656,16 @@ export default function WorkoutsPage() {
                           />
                         </div>
                         <div>
-                          <label className="block text-xs text-gray-500 mb-1">Reps</label>
+                          <label className="block text-xs text-[#555] mb-1">Reps</label>
                           <input
                             className="input"
-                            placeholder="e.g., 8-12"
+                            placeholder="e.g., 8–12"
                             value={newExercise.reps}
                             onChange={e => setNewExercise(p => ({ ...p, reps: e.target.value }))}
                           />
                         </div>
                         <div>
-                          <label className="block text-xs text-gray-500 mb-1">Rest (sec)</label>
+                          <label className="block text-xs text-[#555] mb-1">Rest (sec)</label>
                           <input
                             type="number"
                             className="input"
@@ -545,23 +674,51 @@ export default function WorkoutsPage() {
                           />
                         </div>
                       </div>
+                      {newExercise.notes && (
+                        <input
+                          className="input text-xs text-[#888]"
+                          placeholder="Notes (from preset)"
+                          value={newExercise.notes}
+                          onChange={e => setNewExercise(p => ({ ...p, notes: e.target.value }))}
+                        />
+                      )}
                       <div className="flex gap-2">
                         <button onClick={() => addExercise(routine.id)} className="btn-primary text-sm">
                           Add
                         </button>
-                        <button onClick={() => setAddingExerciseTo(null)} className="btn-secondary text-sm">
+                        <button
+                          onClick={() => { setAddingExerciseTo(null); setNewExercise({ exercise_name: '', muscle_group: MUSCLE_GROUPS[0], sets: 3, reps: '10', rest_seconds: 90, notes: '' }) }}
+                          className="btn-secondary text-sm"
+                        >
                           Cancel
                         </button>
                       </div>
                     </div>
                   ) : (
-                    <button
-                      onClick={() => setAddingExerciseTo(routine.id)}
-                      className="btn-secondary flex items-center gap-2 text-sm"
-                    >
-                      <Plus className="w-4 h-4" />
-                      Add Exercise
-                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setAddingExerciseTo(routine.id)}
+                        className="btn-secondary flex items-center gap-2 text-sm"
+                      >
+                        <Plus className="w-4 h-4" />
+                        Add Exercise
+                      </button>
+                      <button
+                        onClick={() => { setAddingExerciseTo(routine.id); setShowPresetPicker(true) }}
+                        className="flex items-center gap-2 px-3 py-2 rounded-xl bg-blue-500/8 text-blue-400 hover:bg-blue-500/15 text-sm font-medium transition-all border border-blue-500/15"
+                      >
+                        <BookOpen className="w-4 h-4" />
+                        From Presets
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Preset picker modal */}
+                  {showPresetPicker && addingExerciseTo === routine.id && (
+                    <PresetPicker
+                      onSelect={sel => handlePresetSelect(sel, routine.id)}
+                      onClose={() => setShowPresetPicker(false)}
+                    />
                   )}
                 </div>
               )}
@@ -575,10 +732,9 @@ export default function WorkoutsPage() {
         <div className="space-y-4">
           <div className="card space-y-4">
             <h3 className="text-lg font-semibold">Log a Workout</h3>
-
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Select Routine</label>
+                <label className="block text-sm text-[#666] mb-1">Select Routine</label>
                 <select
                   className="select"
                   value={selectedRoutineId}
@@ -590,10 +746,9 @@ export default function WorkoutsPage() {
                   ))}
                 </select>
               </div>
-
               {!selectedRoutineId && (
                 <div>
-                  <label className="block text-sm text-gray-400 mb-1">Workout Name</label>
+                  <label className="block text-sm text-[#666] mb-1">Workout Name</label>
                   <input
                     className="input"
                     placeholder="e.g., Morning Push Session"
@@ -603,19 +758,13 @@ export default function WorkoutsPage() {
                 </div>
               )}
             </div>
-
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Date</label>
-                <input
-                  type="date"
-                  className="input"
-                  value={logDate}
-                  onChange={e => setLogDate(e.target.value)}
-                />
+                <label className="block text-sm text-[#666] mb-1">Date</label>
+                <input type="date" className="input" value={logDate} onChange={e => setLogDate(e.target.value)} />
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Duration (minutes)</label>
+                <label className="block text-sm text-[#666] mb-1">Duration (minutes)</label>
                 <input
                   type="number"
                   className="input"
@@ -625,7 +774,7 @@ export default function WorkoutsPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Notes (optional)</label>
+                <label className="block text-sm text-[#666] mb-1">Notes (optional)</label>
                 <input
                   className="input"
                   placeholder="How did it go?"
@@ -654,21 +803,19 @@ export default function WorkoutsPage() {
                         value={entry.muscle_group}
                         onChange={e => updateEntryField(entryIdx, 'muscle_group', e.target.value)}
                       >
-                        {MUSCLE_GROUPS.map(mg => (
-                          <option key={mg} value={mg}>{mg}</option>
-                        ))}
+                        {MUSCLE_GROUPS.map(mg => <option key={mg} value={mg}>{mg}</option>)}
                       </select>
                     </div>
                   ) : (
                     <div>
                       <p className="font-medium">{entry.exercise_name}</p>
-                      <p className="text-sm text-gray-500">{entry.muscle_group}</p>
+                      <p className="text-sm text-[#555]">{entry.muscle_group}</p>
                     </div>
                   )}
                 </div>
                 <button
                   onClick={() => removeExerciseEntry(entryIdx)}
-                  className="text-gray-600 hover:text-red-400 p-1 ml-2"
+                  className="text-[#444] hover:text-red-400 p-1.5 ml-2 rounded-lg hover:bg-red-500/8 transition-all"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
@@ -676,15 +823,12 @@ export default function WorkoutsPage() {
 
               {/* Sets Table */}
               <div className="space-y-2">
-                <div className="grid grid-cols-[50px_1fr_1fr_40px] gap-2 text-xs text-gray-500 px-1">
-                  <span>Set</span>
-                  <span>Reps</span>
-                  <span>Weight (kg)</span>
-                  <span></span>
+                <div className="grid grid-cols-[50px_1fr_1fr_40px] gap-2 text-xs text-[#555] px-1">
+                  <span>Set</span><span>Reps</span><span>Weight (kg)</span><span />
                 </div>
                 {entry.sets.map((set, setIdx) => (
                   <div key={setIdx} className="grid grid-cols-[50px_1fr_1fr_40px] gap-2 items-center">
-                    <span className="text-sm text-gray-500 text-center">{set.set_number}</span>
+                    <span className="text-sm text-[#555] text-center">{set.set_number}</span>
                     <input
                       type="number"
                       className="input text-sm"
@@ -700,14 +844,14 @@ export default function WorkoutsPage() {
                       onChange={e => updateSetField(entryIdx, setIdx, 'weight_kg', e.target.value)}
                     />
                     <button
-                      onClick={() => {
-                        setExerciseEntries(prev => prev.map((en, i) =>
-                          i === entryIdx
-                            ? { ...en, sets: en.sets.filter((_, si) => si !== setIdx).map((s, si) => ({ ...s, set_number: si + 1 })) }
-                            : en
-                        ))
-                      }}
-                      className="text-gray-600 hover:text-red-400"
+                      onClick={() => setExerciseEntries(prev => prev.map((en, i) =>
+                        i !== entryIdx ? en : {
+                          ...en,
+                          sets: en.sets.filter((_, si) => si !== setIdx)
+                            .map((s, si) => ({ ...s, set_number: si + 1 }))
+                        }
+                      ))}
+                      className="text-[#444] hover:text-red-400"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -715,7 +859,7 @@ export default function WorkoutsPage() {
                 ))}
                 <button
                   onClick={() => addSetToEntry(entryIdx)}
-                  className="text-sm text-green-500 hover:text-green-400 flex items-center gap-1"
+                  className="text-sm text-blue-500 hover:text-blue-400 flex items-center gap-1"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   Add Set
@@ -741,13 +885,13 @@ export default function WorkoutsPage() {
         </div>
       )}
 
-      {/* ═══════════════════ TAB 3: WORKOUT HISTORY ═══════════════════ */}
+      {/* ═══════════════════ TAB 3: HISTORY ═══════════════════ */}
       {activeTab === 'history' && (
-        <div className="space-y-4">
+        <div className="space-y-3">
           {workoutLogs.length === 0 ? (
             <div className="card text-center py-12">
-              <History className="w-12 h-12 text-gray-600 mx-auto mb-3" />
-              <p className="text-gray-400">No workouts logged yet. Hit the gym and come back!</p>
+              <History className="w-12 h-12 text-[#333] mx-auto mb-3" />
+              <p className="text-[#555]">No workouts logged yet. Hit the gym and come back!</p>
             </div>
           ) : (
             workoutLogs.map(log => (
@@ -760,15 +904,16 @@ export default function WorkoutsPage() {
                     <div className="flex items-center gap-3">
                       <h3 className="font-semibold">{log.workout_name}</h3>
                     </div>
-                    <div className="flex items-center gap-4 mt-1.5 text-sm text-gray-400">
+                    <div className="flex items-center gap-4 mt-1.5 text-sm text-[#666]">
                       <span className="flex items-center gap-1">
                         <Calendar className="w-3.5 h-3.5" />
-                        {new Date(log.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
+                        {new Date(log.date).toLocaleDateString('en-US', {
+                          weekday: 'short', month: 'short', day: 'numeric', year: 'numeric'
+                        })}
                       </span>
                       {log.duration_minutes && (
                         <span className="flex items-center gap-1">
-                          <Clock className="w-3.5 h-3.5" />
-                          {log.duration_minutes} min
+                          <Clock className="w-3.5 h-3.5" />{log.duration_minutes} min
                         </span>
                       )}
                       <span className="flex items-center gap-1">
@@ -776,29 +921,38 @@ export default function WorkoutsPage() {
                         {new Set(log.exercise_logs?.map(e => e.exercise_name)).size || 0} exercises
                       </span>
                     </div>
-                    {log.notes && (
-                      <p className="text-sm text-gray-500 mt-1">{log.notes}</p>
-                    )}
+                    {log.notes && <p className="text-sm text-[#555] mt-1">{log.notes}</p>}
                   </div>
-                  <div className="flex items-center gap-2">
+
+                  <div className="flex items-center gap-1">
                     <button
                       onClick={() => setExpandedLog(expandedLog === log.id ? null : log.id)}
-                      className="text-gray-500 hover:text-white p-1"
+                      className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-[#1e1e1e] transition-all"
                     >
-                      {expandedLog === log.id ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
+                      {expandedLog === log.id
+                        ? <ChevronUp className="w-4 h-4" />
+                        : <ChevronDown className="w-4 h-4" />}
                     </button>
-                    <button
-                      onClick={() => deleteWorkoutLog(log.id)}
-                      className="text-gray-500 hover:text-red-400 p-1"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+
+                    {confirmDeleteId === log.id ? (
+                      <InlineConfirm
+                        label="Delete log?"
+                        onConfirm={() => confirmDeleteLog(log)}
+                        onCancel={cancelDelete}
+                      />
+                    ) : (
+                      <button
+                        onClick={() => requestDelete(log.id)}
+                        className="text-[#555] hover:text-red-400 p-1.5 rounded-lg hover:bg-red-500/8 transition-all"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                 </div>
 
-                {/* Expanded Log Details */}
                 {expandedLog === log.id && log.exercise_logs && (
-                  <div className="mt-4 pt-4 border-t border-[#262626] space-y-3">
+                  <div className="mt-4 pt-4 border-t border-[#1e1e1e] space-y-3">
                     {(() => {
                       const grouped: Record<string, ExerciseLog[]> = {}
                       log.exercise_logs.forEach(el => {
@@ -806,21 +960,19 @@ export default function WorkoutsPage() {
                         grouped[el.exercise_name].push(el)
                       })
                       return Object.entries(grouped).map(([name, sets]) => (
-                        <div key={name} className="bg-[#1a1a1a] rounded-lg px-4 py-3">
+                        <div key={name} className="bg-[#161616] border border-[#1e1e1e] rounded-xl px-4 py-3">
                           <div className="flex items-center justify-between mb-2">
-                            <p className="font-medium">{name}</p>
-                            <span className="badge-blue">{sets[0]?.muscle_group}</span>
+                            <p className="font-medium text-sm">{name}</p>
+                            <span className="badge badge-blue">{sets[0]?.muscle_group}</span>
                           </div>
-                          <div className="grid grid-cols-3 gap-2 text-xs text-gray-500 mb-1">
-                            <span>Set</span>
-                            <span>Reps</span>
-                            <span>Weight</span>
+                          <div className="grid grid-cols-3 gap-2 text-xs text-[#555] mb-1">
+                            <span>Set</span><span>Reps</span><span>Weight</span>
                           </div>
                           {sets.map(s => (
                             <div key={s.id} className="grid grid-cols-3 gap-2 text-sm py-0.5">
-                              <span className="text-gray-400">{s.set_number}</span>
-                              <span>{s.reps ?? '-'}</span>
-                              <span>{s.weight_kg != null ? `${s.weight_kg} kg` : '-'}</span>
+                              <span className="text-[#666]">{s.set_number}</span>
+                              <span>{s.reps ?? '–'}</span>
+                              <span>{s.weight_kg != null ? `${s.weight_kg} kg` : '–'}</span>
                             </div>
                           ))}
                         </div>
@@ -833,6 +985,88 @@ export default function WorkoutsPage() {
           )}
         </div>
       )}
+
+      {/* ═══════════════════ UNDO TOAST ═══════════════════ */}
+      {undoPending && (
+        <UndoToast
+          label={undoPending.label}
+          countdown={undoPending.countdown}
+          onUndo={handleUndo}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── Inline confirm UI ─────────────────────────────────────────────
+function InlineConfirm({
+  label,
+  onConfirm,
+  onCancel,
+}: {
+  label: string
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  return (
+    <div className="flex items-center gap-1.5 pl-1">
+      <span className="text-xs text-red-400 flex items-center gap-1 whitespace-nowrap">
+        <AlertTriangle className="w-3 h-3" />
+        {label}
+      </span>
+      <button
+        onClick={onConfirm}
+        className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-500/15 text-red-400 hover:bg-red-500/25 text-xs font-semibold transition-all"
+      >
+        <Check className="w-3 h-3" />
+        Yes
+      </button>
+      <button
+        onClick={onCancel}
+        className="flex items-center gap-1 px-2 py-1 rounded-lg bg-[#1e1e1e] text-[#777] hover:text-white text-xs transition-all"
+      >
+        <X className="w-3 h-3" />
+        No
+      </button>
+    </div>
+  )
+}
+
+// ── Undo toast ────────────────────────────────────────────────────
+function UndoToast({
+  label,
+  countdown,
+  onUndo,
+}: {
+  label: string
+  countdown: number
+  onUndo: () => void
+}) {
+  return (
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 md:left-auto md:translate-x-0 md:right-6">
+      <div className="bg-[#1a1a1a] border border-[#2e2e2e] rounded-2xl shadow-2xl overflow-hidden min-w-[300px] max-w-sm">
+        <div className="flex items-center gap-3 px-4 py-3">
+          <Trash2 className="w-4 h-4 text-[#555] shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm text-white truncate">Deleted {label}</p>
+            <p className="text-xs text-[#555]">Undoing in {countdown}s…</p>
+          </div>
+          <button
+            onClick={onUndo}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 text-sm font-semibold transition-all border border-blue-500/20 shrink-0"
+          >
+            <Undo2 className="w-3.5 h-3.5" />
+            Undo
+          </button>
+        </div>
+        {/* Countdown progress bar */}
+        <div className="h-0.5 bg-[#252525]">
+          <div
+            className="h-full bg-blue-500 transition-all duration-1000 ease-linear"
+            style={{ width: `${(countdown / 5) * 100}%` }}
+          />
+        </div>
+      </div>
     </div>
   )
 }
