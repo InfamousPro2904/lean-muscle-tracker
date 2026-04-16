@@ -1,12 +1,13 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { MUSCLE_GROUPS, KEY_EVIDENCE, type MuscleGroup, type ExerciseEntry, type EquipmentType } from '@/lib/exercise-presets'
 import MuscleDiagram from '@/components/MuscleDiagram'
 import MotionCue from '@/components/MotionCue'
 import {
   BookOpen, ChevronDown, ChevronUp, Info, Zap,
-  Clock, RotateCcw, Dumbbell, Activity
+  Clock, RotateCcw, Dumbbell, Activity, Plus
 } from 'lucide-react'
 
 type Equipment = 'all' | 'machine' | 'free_weight' | 'bodyweight'
@@ -157,6 +158,7 @@ export default function PresetsPage() {
               equipment={equipment}
               expanded={expandedExercise === entry.key}
               onToggle={() => toggleExercise(entry.key)}
+              muscleId={group.id}
             />
           ))}
         </div>
@@ -199,11 +201,13 @@ function ExerciseCard({
   equipment,
   expanded,
   onToggle,
+  muscleId,
 }: {
   entry: ExerciseEntry
   equipment: Equipment
   expanded: boolean
   onToggle: () => void
+  muscleId: string
 }) {
   const variants: { key: string; label: string; variant: NonNullable<ExerciseEntry['machine']> }[] = []
 
@@ -227,6 +231,24 @@ function ExerciseCard({
 
   const [activeVariant, setActiveVariant] = useState(variants[0].key)
   const current = variants.find(v => v.key === activeVariant)?.variant ?? variants[0].variant
+
+  const router = useRouter()
+
+  const handleAddToWorkout = () => {
+    // Mapping from preset muscle group IDs to workout muscle group strings
+    const MUSCLE_MAP: Record<string, string> = {
+      chest: 'Chest', back: 'Back', shoulders: 'Shoulders',
+      biceps: 'Biceps', triceps: 'Triceps', quadriceps: 'Quads',
+      hamstrings: 'Hamstrings', glutes: 'Glutes', calves: 'Calves', core_abs: 'Abs',
+    }
+    const params = new URLSearchParams({
+      addExercise: current.name,
+      muscle: MUSCLE_MAP[muscleId] ?? 'Chest',
+      sets: current.sets.includes('–') ? current.sets.split('–')[0] : current.sets,
+      reps: current.reps.includes('–') ? current.reps.split('–')[1] : current.reps,
+    })
+    router.push(`/workouts?${params.toString()}`)
+  }
 
   return (
     <div className="card-hover overflow-hidden">
@@ -300,6 +322,15 @@ function ExerciseCard({
               </div>
             ))}
           </div>
+
+          {/* Add to workout */}
+          <button
+            onClick={handleAddToWorkout}
+            className="btn-primary w-full flex items-center justify-center gap-2 text-sm mt-2"
+          >
+            <Plus className="w-4 h-4" />
+            Add to Workout
+          </button>
         </div>
       )}
     </div>

@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, Suspense } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase'
 import {
   WorkoutRoutine, RoutineExercise, WorkoutLog, ExerciseLog,
@@ -27,6 +28,27 @@ interface UndoPending {
   countdown: number
   restore: () => void
   doDelete: () => Promise<void>
+}
+
+// ── PresetQueryReader reads URL params and fills exercise form ───
+// Must be isolated here so it can be Suspense-wrapped
+function PresetQueryReader({
+  onPreset,
+}: {
+  onPreset: (name: string, muscle: string, sets: string, reps: string) => void
+}) {
+  const searchParams = useSearchParams()
+  useEffect(() => {
+    const name = searchParams.get('addExercise')
+    const muscle = searchParams.get('muscle') ?? 'Chest'
+    const sets = searchParams.get('sets') ?? '3'
+    const reps = searchParams.get('reps') ?? '10'
+    if (name) {
+      onPreset(name, muscle, sets, reps)
+      window.history.replaceState({}, '', '/workouts')
+    }
+  }, [searchParams, onPreset])
+  return null
 }
 
 export default function WorkoutsPage() {
@@ -76,6 +98,18 @@ export default function WorkoutsPage() {
       setLoading(false)
     })
   }, [supabase.auth])
+
+  // ─── Handle preset selection from URL params ───
+  const handlePresetQuery = useCallback((name: string, muscle: string, sets: string, reps: string) => {
+    setActiveTab('log')
+    setNewExercise(prev => ({
+      ...prev,
+      exercise_name: name,
+      muscle_group: muscle,
+      sets: parseInt(sets) || 3,
+      reps,
+    }))
+  }, [])
 
   // ─── Fetch Routines ───
   const fetchRoutines = useCallback(async () => {
@@ -414,6 +448,11 @@ export default function WorkoutsPage() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-6 pb-20">
+      {/* URL param reader — must be in Suspense per Next.js 16 */}
+      <Suspense fallback={null}>
+        <PresetQueryReader onPreset={handlePresetQuery} />
+      </Suspense>
+
       {/* Header */}
       <div>
         <div className="flex items-center gap-2.5 mb-1">

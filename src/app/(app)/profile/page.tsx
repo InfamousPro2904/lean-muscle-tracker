@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { User, Save, Calculator, Lock, Trash2, AlertTriangle } from 'lucide-react'
+import { User, Save, Calculator, Lock, Trash2, AlertTriangle, Activity } from 'lucide-react'
 import { createClient } from '@/lib/supabase'
 import type { Profile } from '@/lib/types'
 
@@ -191,7 +191,7 @@ export default function ProfilePage() {
     return (
       <div className="text-white flex items-center justify-center min-h-[60vh]">
         <div className="flex flex-col items-center gap-3">
-          <User className="w-10 h-10 text-green-500 animate-pulse" />
+          <User className="w-10 h-10 text-blue-500 animate-pulse" />
           <p className="text-gray-400">Loading profile...</p>
         </div>
       </div>
@@ -203,7 +203,7 @@ export default function ProfilePage() {
       {/* Page Header */}
       <div className="mb-8">
         <div className="flex items-center gap-3 mb-2">
-          <User className="w-7 h-7 text-green-400" />
+          <User className="w-7 h-7 text-blue-400" />
           <h1 className="text-2xl md:text-3xl font-bold">Profile Settings</h1>
         </div>
         <p className="text-gray-400">Manage your personal info, nutrition targets, and account.</p>
@@ -299,6 +299,105 @@ export default function ProfilePage() {
           </div>
         </div>
       </div>
+
+      {/* ── BMI Calculator ── */}
+      {(() => {
+        const weight = parseFloat(form.weight_kg)
+        const height = parseFloat(form.height_cm)
+        const hasBMI = weight > 0 && height > 0
+        const bmi = hasBMI ? weight / Math.pow(height / 100, 2) : null
+        const bmiVal = bmi ? Math.round(bmi * 10) / 10 : null
+
+        type BMITier = { label: string; color: string; bar: string; range: string; desc: string }
+        const tiers: BMITier[] = [
+          { label: 'Underweight', color: 'text-blue-400',   bar: 'bg-blue-400',   range: '< 18.5', desc: 'Consider a caloric surplus and strength training to build mass.' },
+          { label: 'Normal',      color: 'text-emerald-400', bar: 'bg-emerald-400', range: '18.5–24.9', desc: 'Healthy range — focus on body composition rather than scale weight.' },
+          { label: 'Overweight',  color: 'text-amber-400',  bar: 'bg-amber-400',  range: '25–29.9', desc: 'Mild caloric deficit + resistance training — preserve muscle.' },
+          { label: 'Obese',       color: 'text-red-400',    bar: 'bg-red-400',    range: '≥ 30', desc: 'Prioritise gradual fat loss — high-protein diet, progressive cardio.' },
+        ]
+        const activeTier =
+          !bmiVal ? null :
+          bmiVal < 18.5 ? tiers[0] :
+          bmiVal < 25   ? tiers[1] :
+          bmiVal < 30   ? tiers[2] : tiers[3]
+
+        // Position needle: 10 (min) → 40 (max), clamped
+        const pct = bmiVal ? Math.min(Math.max(((bmiVal - 10) / 30) * 100, 0), 100) : null
+
+        return (
+          <div className="card mb-6">
+            <div className="flex items-center gap-2 mb-4">
+              <Activity className="w-5 h-5 text-blue-400" />
+              <h2 className="text-lg font-semibold">BMI Calculator</h2>
+              {activeTier && (
+                <span className={`ml-auto text-xs font-semibold px-2.5 py-1 rounded-full bg-[#1a1a1a] border border-[#252525] ${activeTier.color}`}>
+                  {activeTier.label}
+                </span>
+              )}
+            </div>
+
+            {!hasBMI ? (
+              <p className="text-sm text-[#555]">Enter your weight and height above to calculate BMI.</p>
+            ) : (
+              <div className="space-y-5">
+                {/* BMI value */}
+                <div className="flex items-end gap-3">
+                  <p className={`text-5xl font-black tracking-tight ${activeTier?.color ?? 'text-white'}`}>
+                    {bmiVal}
+                  </p>
+                  <p className="text-sm text-[#555] pb-2">BMI · {weight}kg / {height}cm</p>
+                </div>
+
+                {/* Gradient bar + needle */}
+                <div className="relative">
+                  <div className="h-3 rounded-full overflow-hidden" style={{
+                    background: 'linear-gradient(to right, #3b82f6 0%, #3b82f6 25%, #10b981 25%, #10b981 55%, #f59e0b 55%, #f59e0b 77%, #ef4444 77%, #ef4444 100%)'
+                  }}>
+                  </div>
+                  {pct !== null && (
+                    <div
+                      className="absolute top-1/2 -translate-y-1/2 w-4 h-4 rounded-full border-2 border-white shadow-lg bg-white"
+                      style={{ left: `calc(${pct}% - 8px)` }}
+                    />
+                  )}
+                  <div className="flex justify-between text-[10px] text-[#444] mt-1.5">
+                    <span>10</span>
+                    <span>18.5</span>
+                    <span>25</span>
+                    <span>30</span>
+                    <span>40+</span>
+                  </div>
+                </div>
+
+                {/* Category legend */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {tiers.map((t) => (
+                    <div
+                      key={t.label}
+                      className={`rounded-xl p-2.5 text-center border transition-all ${
+                        activeTier?.label === t.label
+                          ? `bg-[#1a1a1a] border-[#2a2a2a]`
+                          : 'bg-[#0e0e0e] border-[#171717]'
+                      }`}
+                    >
+                      <div className={`h-1 w-8 rounded-full ${t.bar} mx-auto mb-1.5 ${activeTier?.label === t.label ? 'opacity-100' : 'opacity-30'}`} />
+                      <p className={`text-xs font-semibold ${activeTier?.label === t.label ? t.color : 'text-[#444]'}`}>{t.label}</p>
+                      <p className="text-[10px] text-[#444] mt-0.5">{t.range}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Advice */}
+                {activeTier && (
+                  <div className="bg-[#0e0e0e] rounded-xl px-4 py-3 border border-[#1a1a1a]">
+                    <p className="text-xs text-[#777] leading-relaxed">{activeTier.desc}</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })()}
 
       {/* ── Section 2: Nutrition Targets ── */}
       <div className="card mb-6">
