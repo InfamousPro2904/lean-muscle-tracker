@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Lean Muscle Tracker',
-  description: 'Fitness routine planning, diet tracking, and progress monitoring for lean muscle building',
+  title: 'Workout Routine',
+  description: 'Plan workouts, track nutrition, and monitor progress — your complete training system.',
 }
 
 export default function RootLayout({

@@ -5,7 +5,8 @@ import Link from 'next/link'
 import {
   Dumbbell, UtensilsCrossed, TrendingUp, Target, Flame, Plus,
   ChevronDown, ChevronUp, Sparkles, Calendar, Clock, Zap,
-  Activity, BarChart2, BookOpen
+  Activity, BarChart2, BookOpen, BookmarkPlus, CheckCircle2,
+  AlertCircle, Loader2
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase'
 import type { Profile, MealLog, WorkoutLog, ProgressLog } from '@/lib/types'
@@ -138,6 +139,29 @@ function generateWorkoutPlan(form: PlannerForm): DayPlan[] {
   return plans
 }
 
+// ── Save-plan helpers ──────────────────────────────────────────────
+
+const DAY_NAME_TO_IDX: Record<string, number> = {
+  Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3,
+  Thursday: 4, Friday: 5, Saturday: 6,
+}
+
+const FOCUS_TO_SPLIT: Record<string, string> = {
+  Push: 'ppl', Pull: 'ppl', Legs: 'ppl',
+  Upper: 'upper_lower', Lower: 'upper_lower',
+  'Full Body': 'full_body',
+  'Chest/Tri': 'bro_split', 'Back/Bi': 'bro_split',
+  Shoulders: 'bro_split', 'Arms/Core': 'bro_split',
+}
+
+const FOCUS_TO_MUSCLE: Record<string, string> = {
+  Push: 'Chest', Pull: 'Back', Legs: 'Quads',
+  Upper: 'Chest', Lower: 'Quads',
+  'Full Body': 'Full Body',
+  'Chest/Tri': 'Chest', 'Back/Bi': 'Back',
+  Shoulders: 'Shoulders', 'Arms/Core': 'Biceps',
+}
+
 // ── Stat ring component ────────────────────────────────────────────
 
 function RingProgress({ percent, color, children }: {
@@ -183,6 +207,11 @@ export default function DashboardPage() {
   })
   const [weekPlan, setWeekPlan] = useState<DayPlan[] | null>(null)
   const [planExpanded, setPlanExpanded] = useState<number | null>(null)
+
+  // Save-plan state
+  const [savingPlan, setSavingPlan] = useState(false)
+  const [saveSuccess, setSaveSuccess] = useState(false)
+  const [saveError, setSaveError] = useState('')
 
   const fetchData = useCallback(async () => {
     const { data: { user } } = await supabase.auth.getUser()
@@ -233,6 +262,70 @@ export default function DashboardPage() {
     const plan = generateWorkoutPlan(plannerForm)
     setWeekPlan(plan)
     setPlanExpanded(null)
+    setSaveSuccess(false)
+    setSaveError('')
+  }
+
+  const savePlanToWorkouts = async () => {
+    if (!weekPlan) return
+    setSavingPlan(true)
+    setSaveError('')
+    setSaveSuccess(false)
+
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error('Not authenticated')
+
+      const trainingDays = weekPlan.filter(d => !d.isRest)
+
+      for (const day of trainingDays) {
+        const dayIdx = DAY_NAME_TO_IDX[day.dayName] ?? 1
+        const splitType = FOCUS_TO_SPLIT[day.focus] ?? 'custom'
+        const muscleGroup = FOCUS_TO_MUSCLE[day.focus] ?? day.focus
+
+        const goalLabel = plannerForm.goal.replace(/_/g, ' ')
+
+        const { data: routine, error: routineError } = await supabase
+          .from('workout_routines')
+          .insert({
+            user_id: user.id,
+            name: `${day.focus} — ${day.dayName}`,
+            description: `Auto-generated ${goalLabel} plan · ${plannerForm.time} min · ${plannerForm.level}`,
+            split_type: splitType,
+            day_of_week: [dayIdx],
+            is_active: true,
+          })
+          .select()
+          .single()
+
+        if (routineError) throw routineError
+
+        if (day.exercises.length > 0) {
+          const rows = day.exercises.map((ex, idx) => ({
+            routine_id: routine.id,
+            exercise_name: ex.name,
+            muscle_group: muscleGroup,
+            sets: parseInt(ex.sets.split('–')[0]) || 3,
+            reps: ex.reps,
+            rest_seconds: 90,
+            notes: `Equipment: ${ex.equipment}`,
+            sort_order: idx,
+          }))
+
+          const { error: exError } = await supabase
+            .from('routine_exercises')
+            .insert(rows)
+
+          if (exError) throw exError
+        }
+      }
+
+      setSaveSuccess(true)
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to save plan')
+    } finally {
+      setSavingPlan(false)
+    }
   }
 
   if (loading) {
@@ -596,6 +689,55 @@ export default function DashboardPage() {
                       )}
                     </div>
                   ))}
+                </div>
+
+                {/* ── Save full plan CTA ── */}
+                <div className="mt-5 rounded-2xl border border-[#1e1e1e] bg-[#0e0e0e] px-5 py-4">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+                    <div className="flex-1">
+                      <p className="text-sm font-semibold">Save Full Week Plan to My Workouts</p>
+                      <p className="text-xs text-[#555] mt-0.5">
+                        Creates {weekPlan.filter(d => !d.isRest).length} routines in your workout library so you can log sessions directly.
+                      </p>
+                    </div>
+                    <button
+                      onClick={savePlanToWorkouts}
+                      disabled={savingPlan || saveSuccess}
+                      className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all shrink-0 ${
+                        saveSuccess
+                          ? 'bg-green-500/15 text-green-400 border border-green-500/20'
+                          : 'btn-primary'
+                      } disabled:opacity-60`}
+                    >
+                      {savingPlan ? (
+                        <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</>
+                      ) : saveSuccess ? (
+                        <><CheckCircle2 className="w-4 h-4" /> Saved!</>
+                      ) : (
+                        <><BookmarkPlus className="w-4 h-4" /> Add to My Workouts</>
+                      )}
+                    </button>
+                  </div>
+
+                  {saveSuccess && (
+                    <div className="mt-3 flex items-center gap-2 text-xs text-green-400">
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        Plan saved! Go to{' '}
+                        <Link href="/workouts" className="underline hover:text-green-300">
+                          Workouts
+                        </Link>{' '}
+                        to start logging sessions.
+                      </span>
+                    </div>
+                  )}
+
+                  {saveError && (
+                    <div className="mt-3 flex items-center gap-2 text-xs text-red-400">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>{saveError}</span>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
