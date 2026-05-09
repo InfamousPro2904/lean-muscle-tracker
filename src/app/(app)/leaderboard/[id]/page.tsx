@@ -3,8 +3,9 @@
 import { useState, useEffect, useCallback, use } from 'react'
 import {
   Users, Hash, Copy, Check, Flame, Crown, Loader2,
-  ChevronDown, ChevronUp, Medal, Star, X, AlertCircle,
-  Archive, RefreshCw,
+  ChevronDown, ChevronUp, Medal, Star, AlertCircle,
+  Archive, RefreshCw, Settings, SlidersHorizontal,
+  TrendingUp, TrendingDown, Minus,
 } from 'lucide-react'
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
@@ -16,7 +17,10 @@ import {
   calculateWeeklyScore, calculateStreak, getWeekStart, getWeekEnd,
   formatWeekLabel, BADGE_DEFINITIONS, GOAL_LABELS, ACTIVITY_LABELS,
   memberColor, scoreColorClass, REACTION_EMOJIS,
+  goalProgressPct, scoreTrend,
 } from '@/lib/scoring'
+import MemberSettingsModal from '@/components/leaderboard/MemberSettingsModal'
+import LeaderboardManageModal from '@/components/leaderboard/LeaderboardManageModal'
 
 // ── Sub-types ──────────────────────────────────────────────────────
 
@@ -149,64 +153,13 @@ function ReactionBar({
   )
 }
 
-// ── Update weight modal ────────────────────────────────────────────
+// ── Trend pill ─────────────────────────────────────────────────────
 
-function UpdateWeightModal({
-  memberId,
-  current,
-  onClose,
-  onUpdated,
-}: {
-  memberId:  string
-  current:   number | null
-  onClose:   () => void
-  onUpdated: (w: number) => void
-}) {
-  const supabase = createClient()
-  const [val,    setVal]    = useState(current?.toString() ?? '')
-  const [saving, setSaving] = useState(false)
-
-  const save = async () => {
-    setSaving(true)
-    const w = parseFloat(val)
-    if (!isNaN(w) && w > 0) {
-      await supabase
-        .from('leaderboard_members')
-        .update({ current_weight_kg: w })
-        .eq('id', memberId)
-      onUpdated(w)
-    }
-    setSaving(false)
-    onClose()
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full max-w-xs bg-[#111] border border-[#222] rounded-3xl p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <h3 className="font-semibold text-sm">Update Current Weight</h3>
-          <button onClick={onClose} className="text-[#555] hover:text-white"><X className="w-4 h-4" /></button>
-        </div>
-        <input
-          type="number"
-          value={val}
-          onChange={e => setVal(e.target.value)}
-          placeholder="kg"
-          className="input text-center"
-          autoFocus
-        />
-        <button
-          onClick={save}
-          disabled={saving || !val}
-          className="btn-primary w-full flex items-center justify-center gap-2 disabled:opacity-50"
-        >
-          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-          Save
-        </button>
-      </div>
-    </div>
-  )
+function TrendPill({ trend }: { trend: 'up' | 'down' | 'flat' | null }) {
+  if (!trend) return null
+  if (trend === 'up')   return <span className="flex items-center gap-0.5 text-[10px] text-emerald-400" title="Up vs last week"><TrendingUp className="w-3 h-3" /></span>
+  if (trend === 'down') return <span className="flex items-center gap-0.5 text-[10px] text-red-400" title="Down vs last week"><TrendingDown className="w-3 h-3" /></span>
+  return <span className="flex items-center gap-0.5 text-[10px] text-[#666]" title="Flat vs last week"><Minus className="w-3 h-3" /></span>
 }
 
 // ── Main page ──────────────────────────────────────────────────────
@@ -228,8 +181,10 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
   const [copied,   setCopied]   = useState(false)
   const [archiving,setArchiving]= useState(false)
   const [archErr,  setArchErr]  = useState('')
-  const [showWtModal,  setShowWtModal]  = useState(false)
-  const [showConfetti, setShowConfetti] = useState(false)
+  const [showSettingsModal, setShowSettingsModal] = useState(false)
+  const [showManageModal,   setShowManageModal]   = useState(false)
+  const [showConfetti,      setShowConfetti]      = useState(false)
+  const [autoArchiveBanner, setAutoArchiveBanner] = useState<string | null>(null)
 
   const weekStart = getWeekStart()
   const weekEnd   = getWeekEnd(weekStart)
@@ -328,60 +283,133 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
     setTimeout(() => setCopied(false), 2000)
   }
 
-  // Archive current week
+  // ── Shared archive helper (used by manual archive + auto-archive) ────────
+
+  const archiveWeekHelper = async (
+    weekStartIso: string,
+    weekEndIso:   string,
+    rowsForWeek:  MemberRow[]
+  ): Promise<{ ok: true } | { ok: false; reason: string }> => {
+    if (!lb) return { ok: false, reason: 'No leaderboard' }
+
+    const winner = rowsForWeek.length > 0 ? rowsForWeek[0].user_id : null
+    const scores: Record<string, WeeklyScore> = {}
+    rowsForWeek.forEach(r => { scores[r.user_id] = r.score })
+
+    const { error } = await supabase.from('weekly_archives').insert({
+      leaderboard_id: lb.id,
+      week_start:     weekStartIso,
+      week_end:       weekEndIso,
+      winner_user_id: winner,
+      scores,
+    })
+
+    if (error) {
+      const dup = error.message.includes('unique') || error.message.includes('duplicate')
+      return { ok: false, reason: dup ? 'This week is already archived.' : error.message }
+    }
+
+    // Award badges + notifications — use Promise.all to avoid race (LB-8)
+    const badgeInserts = []
+    const notifInserts: Record<string, unknown>[] = []
+
+    if (winner) {
+      badgeInserts.push(
+        supabase.from('badges').upsert({ user_id: winner, leaderboard_id: lb.id, badge_type: 'week_winner', meta: { week: weekStartIso } })
+      )
+      notifInserts.push({
+        user_id: winner, type: 'week_winner',
+        title: '👑 You won the week!',
+        body:  `You topped ${lb.name} for the week of ${formatWeekLabel(weekStartIso)}.`,
+        data:  { leaderboard_id: lb.id },
+      })
+    }
+
+    for (const r of rowsForWeek) {
+      if (r.score.total >= 100) {
+        badgeInserts.push(supabase.from('badges').upsert({ user_id: r.user_id, leaderboard_id: lb.id, badge_type: 'century', meta: {} }))
+      } else if (r.score.total >= 80) {
+        badgeInserts.push(supabase.from('badges').upsert({ user_id: r.user_id, leaderboard_id: lb.id, badge_type: 'top_scorer', meta: {} }))
+      }
+      const activeDays = r.logs.filter(l => l.workout_done || l.is_rest_day || l.kcal_in > 0).length
+      if (activeDays >= 5) {
+        badgeInserts.push(supabase.from('badges').upsert({ user_id: r.user_id, leaderboard_id: lb.id, badge_type: 'consistent', meta: {} }))
+      }
+    }
+
+    await Promise.all(badgeInserts)
+
+    if (notifInserts.length > 0) {
+      await supabase.from('notifications').insert(notifInserts)
+    }
+
+    return { ok: true }
+  }
+
+  // Manual archive of current week
   const archiveWeek = async () => {
     if (!lb) return
     setArchiving(true)
     setArchErr('')
     try {
-      const winner = rows[0]?.user_id ?? null
-      const scores: Record<string, WeeklyScore> = {}
-      rows.forEach(r => { scores[r.user_id] = r.score })
-
-      const { error } = await supabase.from('weekly_archives').insert({
-        leaderboard_id: lb.id,
-        week_start:     weekStart,
-        week_end:       weekEnd,
-        winner_user_id: winner,
-        scores,
-      })
-
-      if (error) {
-        if (error.message.includes('unique') || error.message.includes('duplicate')) {
-          setArchErr('This week is already archived.')
-        } else {
-          setArchErr(error.message)
-        }
-        return
-      }
-
-      // Award badges
-      const notifInserts: unknown[] = []
-      if (winner) {
-        await supabase.from('badges').upsert({ user_id: winner, leaderboard_id: lb.id, badge_type: 'week_winner', meta: { week: weekStart } })
-        notifInserts.push({ user_id: winner, type: 'week_winner', title: '👑 You won the week!', body: `You topped ${lb.name} for the week of ${formatWeekLabel(weekStart)}.`, data: { leaderboard_id: lb.id } })
-      }
-      rows.forEach(r => {
-        if (r.score.total >= 100) {
-          supabase.from('badges').upsert({ user_id: r.user_id, leaderboard_id: lb.id, badge_type: 'century', meta: {} })
-        } else if (r.score.total >= 80) {
-          supabase.from('badges').upsert({ user_id: r.user_id, leaderboard_id: lb.id, badge_type: 'top_scorer', meta: {} })
-        }
-        const activeDays = r.logs.filter(l => l.workout_done || l.is_rest_day || l.kcal_in > 0).length
-        if (activeDays >= 5) {
-          supabase.from('badges').upsert({ user_id: r.user_id, leaderboard_id: lb.id, badge_type: 'consistent', meta: {} })
-        }
-      })
-
-      if (notifInserts.length > 0) {
-        await supabase.from('notifications').insert(notifInserts)
-      }
-
+      const result = await archiveWeekHelper(weekStart, weekEnd, rows)
+      if (!result.ok) { setArchErr(result.reason); return }
       await load()
     } finally {
       setArchiving(false)
     }
   }
+
+  // Auto-archive last week (LB-3) — runs silently after `load()` resolves
+  // when isCreator AND auto_archive=true AND last week unarchived.
+  const autoArchiveLastWeekIfDue = useCallback(async () => {
+    if (!lb || !lb.auto_archive) return
+    if (lb.created_by !== myId) return  // creator-only
+
+    // Compute last week (Mon to Sun before this week's Mon)
+    const lastWeekStartDate = new Date(weekStart)
+    lastWeekStartDate.setDate(lastWeekStartDate.getDate() - 7)
+    const lastWeekStartIso = lastWeekStartDate.toISOString().split('T')[0]
+    const lastWeekEndIso   = getWeekEnd(lastWeekStartIso)
+
+    if (archives.some(a => a.week_start === lastWeekStartIso)) return  // already archived
+
+    // Fetch last week's logs for all members
+    const memberIds = rows.map(r => r.user_id)
+    if (memberIds.length === 0) return
+    const { data: lastWeekLogs } = await supabase
+      .from('daily_logs')
+      .select('*')
+      .in('user_id', memberIds)
+      .gte('date', lastWeekStartIso)
+      .lte('date', lastWeekEndIso)
+
+    if (!lastWeekLogs || lastWeekLogs.length === 0) return  // no activity that week
+
+    // Build last-week MemberRow list using existing rows (profile, member info) + last week's logs
+    const lastWeekRows: MemberRow[] = rows.map(r => {
+      const memLogs = (lastWeekLogs ?? []).filter(l => l.user_id === r.user_id) as DailyLog[]
+      const score   = calculateWeeklyScore(r, memLogs, r.profile ?? { weight_kg: null, height_cm: null, age: null })
+      return { ...r, logs: memLogs, score }
+    })
+      .filter(r => r.logs.length > 0)
+      .sort((a, b) => b.score.total - a.score.total)
+
+    if (lastWeekRows.length === 0) return
+
+    const result = await archiveWeekHelper(lastWeekStartIso, lastWeekEndIso, lastWeekRows)
+    if (result.ok) {
+      setAutoArchiveBanner(`✓ Auto-archived week of ${formatWeekLabel(lastWeekStartIso)}`)
+      setTimeout(() => setAutoArchiveBanner(null), 5000)
+      await load()
+    }
+    // Silent on duplicate / error — manual archive button remains available
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lb, myId, weekStart, archives, rows, supabase])
+
+  useEffect(() => {
+    if (!loading && lb) autoArchiveLastWeekIfDue()
+  }, [loading, lb, autoArchiveLastWeekIfDue])
 
   const toggleReaction = async (archiveId: string, targetUserId: string, emoji: string, hasIt: boolean) => {
     if (!myId) return
@@ -396,16 +424,6 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
     const archiveIds = archives.map(a => a.id)
     const { data } = await supabase.from('reactions').select('*').in('archive_id', archiveIds)
     setReactions((data ?? []) as Reaction[])
-  }
-
-  const updateMyWeight = async (w: number) => {
-    if (!myMem) return
-    setMyMem(prev => prev ? { ...prev, current_weight_kg: w } : prev)
-    setRows(prev => prev.map(r =>
-      r.user_id === myId
-        ? { ...r, current_weight_kg: w, score: calculateWeeklyScore({ ...r, current_weight_kg: w }, r.logs, r.profile ?? { weight_kg: null, height_cm: null, age: null }) }
-        : r
-    ).sort((a, b) => b.score.total - a.score.total))
   }
 
   // ── Chart data ───────────────────────────────────────────────────
@@ -485,30 +503,42 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
           </div>
         </div>
 
-        <div className="flex items-center gap-4 text-xs text-[#555]">
+        <div className="flex items-center gap-4 text-xs text-[#555] flex-wrap">
           <span className="flex items-center gap-1"><Users className="w-3.5 h-3.5" /> {rows.length} members</span>
           <span>Week of {formatWeekLabel(weekStart)}</span>
           {myMem && (
             <button
-              onClick={() => setShowWtModal(true)}
-              className="flex items-center gap-1 text-blue-400 hover:text-blue-300"
+              onClick={() => setShowSettingsModal(true)}
+              className="flex items-center gap-1.5 text-blue-400 hover:text-blue-300 ml-auto"
             >
-              Update weight
+              <Settings className="w-3.5 h-3.5" /> My Settings
             </button>
           )}
         </div>
 
+        {autoArchiveBanner && (
+          <div className="text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2">
+            {autoArchiveBanner}
+          </div>
+        )}
+
         {isCreator && (
-          <div className="flex items-center gap-3 pt-1 border-t border-[#1a1a1a]">
+          <div className="flex items-center gap-2 pt-1 border-t border-[#1a1a1a] flex-wrap">
             <button
               onClick={archiveWeek}
               disabled={archiving}
               className="flex items-center gap-1.5 text-xs btn-secondary py-1.5 px-3 disabled:opacity-50"
             >
               {archiving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
-              Archive This Week
+              Archive Week
             </button>
-            <button onClick={load} className="text-[#555] hover:text-white">
+            <button
+              onClick={() => setShowManageModal(true)}
+              className="flex items-center gap-1.5 text-xs btn-secondary py-1.5 px-3"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" /> Manage
+            </button>
+            <button onClick={load} className="text-[#555] hover:text-white p-1.5" title="Refresh">
               <RefreshCw className="w-3.5 h-3.5" />
             </button>
             {archErr && <span className="text-xs text-red-400">{archErr}</span>}
@@ -588,40 +618,66 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
                     </div>
                   </div>
 
-                  {/* Score */}
+                  {/* Score + trend */}
                   <div className="text-right shrink-0">
-                    <p className={`text-2xl font-bold ${scoreColorClass(row.score.total)}`}>
-                      {row.score.total}
-                    </p>
+                    <div className="flex items-center justify-end gap-1">
+                      <TrendPill trend={scoreTrend(row.user_id, row.score.total, archives)} />
+                      <p className={`text-2xl font-bold ${scoreColorClass(row.score.total)}`}>
+                        {row.score.total}
+                      </p>
+                    </div>
                     <p className="text-[10px] text-[#555]">/ 100</p>
                   </div>
 
                   {open ? <ChevronUp className="w-4 h-4 text-[#444]" /> : <ChevronDown className="w-4 h-4 text-[#444]" />}
                 </button>
 
-                {open && (
-                  <div className="px-4 pb-4 pt-1 border-t border-[#1a1a1a]">
-                    <ScoreBreakdown score={row.score} />
-                    <div className="mt-3 grid grid-cols-4 gap-2 text-center text-xs">
-                      <div className="bg-[#0e0e0e] rounded-xl py-2">
-                        <p className="text-[#555] mb-0.5">Kcal in</p>
-                        <p className="font-bold">{row.logs.reduce((s, l) => s + l.kcal_in, 0)}</p>
-                      </div>
-                      <div className="bg-[#0e0e0e] rounded-xl py-2">
-                        <p className="text-[#555] mb-0.5">Burnt</p>
-                        <p className="font-bold">{row.logs.reduce((s, l) => s + l.kcal_burnt, 0)}</p>
-                      </div>
-                      <div className="bg-[#0e0e0e] rounded-xl py-2">
-                        <p className="text-[#555] mb-0.5">Active days</p>
-                        <p className="font-bold">{row.logs.filter(l => l.workout_done || l.kcal_in > 0).length}</p>
-                      </div>
-                      <div className="bg-[#0e0e0e] rounded-xl py-2">
-                        <p className="text-[#555] mb-0.5">Rest days</p>
-                        <p className="font-bold">{row.logs.filter(l => l.is_rest_day).length}</p>
+                {open && (() => {
+                  const progress = goalProgressPct(row)
+                  return (
+                    <div className="px-4 pb-4 pt-1 border-t border-[#1a1a1a]">
+                      {/* Goal progress bar (LB-6) */}
+                      {progress !== null && row.start_weight_kg !== null && row.target_weight_kg !== null && (
+                        <div className="mb-3">
+                          <div className="flex items-center justify-between text-[10px] text-[#555] mb-1">
+                            <span>{row.start_weight_kg}kg → {row.target_weight_kg}kg</span>
+                            <span className="font-semibold text-blue-400">{progress}% there</span>
+                          </div>
+                          <div className="h-1.5 bg-[#1a1a1a] rounded-full overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-blue-500 transition-all duration-700"
+                              style={{ width: `${progress}%` }}
+                            />
+                          </div>
+                          {row.current_weight_kg !== null && (
+                            <p className="text-[10px] text-[#666] mt-1">
+                              Currently: <span className="text-white">{row.current_weight_kg}kg</span>
+                            </p>
+                          )}
+                        </div>
+                      )}
+                      <ScoreBreakdown score={row.score} />
+                      <div className="mt-3 grid grid-cols-4 gap-2 text-center text-xs">
+                        <div className="bg-[#0e0e0e] rounded-xl py-2">
+                          <p className="text-[#555] mb-0.5">Kcal in</p>
+                          <p className="font-bold">{row.logs.reduce((s, l) => s + l.kcal_in, 0)}</p>
+                        </div>
+                        <div className="bg-[#0e0e0e] rounded-xl py-2">
+                          <p className="text-[#555] mb-0.5">Burnt</p>
+                          <p className="font-bold">{row.logs.reduce((s, l) => s + l.kcal_burnt, 0)}</p>
+                        </div>
+                        <div className="bg-[#0e0e0e] rounded-xl py-2">
+                          <p className="text-[#555] mb-0.5">Active days</p>
+                          <p className="font-bold">{row.logs.filter(l => l.workout_done || l.kcal_in > 0).length}</p>
+                        </div>
+                        <div className="bg-[#0e0e0e] rounded-xl py-2">
+                          <p className="text-[#555] mb-0.5">Rest days</p>
+                          <p className="font-bold">{row.logs.filter(l => l.is_rest_day).length}</p>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
+                  )
+                })()}
               </div>
             )
           })}
@@ -779,12 +835,23 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
         </div>
       )}
 
-      {showWtModal && myMem && (
-        <UpdateWeightModal
-          memberId={myMem.id}
-          current={myMem.current_weight_kg}
-          onClose={() => setShowWtModal(false)}
-          onUpdated={updateMyWeight}
+      {showSettingsModal && myMem && (
+        <MemberSettingsModal
+          member={myMem}
+          onClose={() => setShowSettingsModal(false)}
+          onUpdated={load}
+        />
+      )}
+
+      {showManageModal && lb && (
+        <LeaderboardManageModal
+          leaderboard={lb}
+          members={rows.map(r => ({
+            ...r,
+            full_name: r.profile?.full_name ?? 'Unknown',
+          }))}
+          onClose={() => setShowManageModal(false)}
+          onUpdated={load}
         />
       )}
     </div>

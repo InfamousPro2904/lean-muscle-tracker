@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createClient } from '@/lib/supabase'
-import { MealLog, Profile, MEAL_TYPES } from '@/lib/types'
+import { MealLog, Profile, MEAL_TYPES, MealTemplate, BasketItem, Macros100g } from '@/lib/types'
+import { QUICK_FOODS, searchFoods, type FoodItem } from '@/lib/foods'
 import {
   UtensilsCrossed,
   Plus,
@@ -16,6 +17,10 @@ import {
   X,
   Loader2,
   Zap,
+  ShoppingBasket,
+  Star,
+  BookmarkPlus,
+  Layers,
 } from 'lucide-react'
 import {
   BarChart,
@@ -60,37 +65,36 @@ function textColor(percent: number): string {
   return 'text-red-400'
 }
 
-// ── Food search types & quick-foods database ─────────────────────────────────
+// ── Search result type (unifies local + Open Food Facts) ───────────────────
 
 interface FoodResult {
-  name: string
-  brand?: string
-  per100g: { kcal: number; protein: number; carbs: number; fat: number }
-  source: 'local' | 'api'
+  name:    string
+  brand?:  string
+  per100g: Macros100g
+  source:  'local' | 'api'
 }
 
-const QUICK_FOODS: FoodResult[] = [
-  { name: 'Chicken Breast (cooked)',  per100g: { kcal: 165, protein: 31,   carbs: 0,    fat: 3.6 }, source: 'local' },
-  { name: 'Brown Rice (cooked)',      per100g: { kcal: 216, protein: 5,    carbs: 45,   fat: 1.8 }, source: 'local' },
-  { name: 'Egg (whole)',              per100g: { kcal: 155, protein: 13,   carbs: 1.1,  fat: 11  }, source: 'local' },
-  { name: 'Oats (dry)',               per100g: { kcal: 389, protein: 17,   carbs: 66,   fat: 7   }, source: 'local' },
-  { name: 'Whey Protein Powder',      per100g: { kcal: 380, protein: 75,   carbs: 10,   fat: 5   }, source: 'local' },
-  { name: 'Salmon (cooked)',          per100g: { kcal: 208, protein: 20,   carbs: 0,    fat: 13  }, source: 'local' },
-  { name: 'Tuna (canned, drained)',   per100g: { kcal: 116, protein: 26,   carbs: 0,    fat: 1   }, source: 'local' },
-  { name: 'Greek Yogurt (plain)',     per100g: { kcal: 59,  protein: 10,   carbs: 3.6,  fat: 0.4 }, source: 'local' },
-  { name: 'Cottage Cheese',           per100g: { kcal: 98,  protein: 11,   carbs: 3.4,  fat: 4.3 }, source: 'local' },
-  { name: 'Sweet Potato (cooked)',    per100g: { kcal: 86,  protein: 1.6,  carbs: 20,   fat: 0.1 }, source: 'local' },
-  { name: 'Banana',                   per100g: { kcal: 89,  protein: 1.1,  carbs: 23,   fat: 0.3 }, source: 'local' },
-  { name: 'Broccoli (cooked)',        per100g: { kcal: 34,  protein: 2.8,  carbs: 7,    fat: 0.4 }, source: 'local' },
-  { name: 'Almonds',                  per100g: { kcal: 579, protein: 21,   carbs: 22,   fat: 50  }, source: 'local' },
-  { name: 'Peanut Butter',            per100g: { kcal: 588, protein: 25,   carbs: 20,   fat: 50  }, source: 'local' },
-  { name: 'White Rice (cooked)',      per100g: { kcal: 130, protein: 2.7,  carbs: 28,   fat: 0.3 }, source: 'local' },
-  { name: 'Whole Milk',               per100g: { kcal: 61,  protein: 3.2,  carbs: 4.8,  fat: 3.3 }, source: 'local' },
-  { name: 'Bread (whole wheat)',      per100g: { kcal: 247, protein: 13,   carbs: 41,   fat: 4.2 }, source: 'local' },
-  { name: 'Avocado',                  per100g: { kcal: 160, protein: 2,    carbs: 9,    fat: 15  }, source: 'local' },
-  { name: 'Lentils (cooked)',         per100g: { kcal: 116, protein: 9,    carbs: 20,   fat: 0.4 }, source: 'local' },
-  { name: 'Pasta (cooked)',           per100g: { kcal: 158, protein: 6,    carbs: 31,   fat: 1   }, source: 'local' },
-]
+function foodItemToResult(item: FoodItem): FoodResult {
+  return { name: item.name, per100g: item.per100g, source: 'local' }
+}
+
+// Basket totals helper
+function basketTotals(items: BasketItem[]): { kcal: number; protein: number; carbs: number; fat: number } {
+  return items.reduce((t, item) => {
+    const s = item.grams / 100
+    return {
+      kcal:    t.kcal    + item.per100g.kcal    * s,
+      protein: t.protein + item.per100g.protein * s,
+      carbs:   t.carbs   + item.per100g.carbs   * s,
+      fat:     t.fat     + item.per100g.fat     * s,
+    }
+  }, { kcal: 0, protein: 0, carbs: 0, fat: 0 })
+}
+
+function genId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
+  return Math.random().toString(36).slice(2)
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -133,15 +137,20 @@ export default function DietPage() {
   const [error, setError] = useState('')
   const [userId, setUserId] = useState<string | null>(null)
 
-  // ── Food search state ───────────────────────────────────────────────────
-  const [searchQuery, setSearchQuery] = useState('')
+  // ── Food search & basket state ──────────────────────────────────────────
+  type LogMode = 'search' | 'templates' | 'manual'
+  const [logMode,       setLogMode]       = useState<LogMode>('search')
+  const [searchQuery,   setSearchQuery]   = useState('')
   const [searchResults, setSearchResults] = useState<FoodResult[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
-  const [selectedFood, setSelectedFood] = useState<FoodResult | null>(null)
-  const [servingGrams, setServingGrams] = useState<number>(100)
-  const [mealType, setMealType] = useState<string>(MEAL_TYPES[0])
-  const [logNotes, setLogNotes] = useState('')
-  const [showManual, setShowManual] = useState(false)
+  const [mealType,      setMealType]      = useState<string>(MEAL_TYPES[0])
+  const [logNotes,      setLogNotes]      = useState('')
+  const [basket,        setBasket]        = useState<BasketItem[]>([])
+  const [editingGramsId, setEditingGramsId] = useState<string | null>(null)
+  const [templates,      setTemplates]      = useState<MealTemplate[]>([])
+  const [savingTemplate, setSavingTemplate] = useState(false)
+  const [templateName,   setTemplateName]   = useState('')
+  const [templatePromptOpen, setTemplatePromptOpen] = useState(false)
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // ── Auth & Profile ──────────────────────────────────────────────────────
@@ -226,30 +235,45 @@ export default function DietPage() {
     fetchWeekly()
   }, [fetchWeekly])
 
-  // ── Food search (debounced) ─────────────────────────────────────────────
+  // ── Food search (debounced, with relevance filtering) ───────────────────
 
   useEffect(() => {
     const q = searchQuery.trim()
     if (!q) { setSearchResults([]); return }
 
-    // Local filter first (instant)
-    const local = QUICK_FOODS.filter(f =>
-      f.name.toLowerCase().includes(q.toLowerCase())
-    )
+    // Local search first (instant) — uses curated foods.ts database
+    const local: FoodResult[] = searchFoods(q, 12).map(foodItemToResult)
     setSearchResults(local)
 
-    // Debounce API call for Open Food Facts
+    // Skip API call if local already has 5+ matches — local is more relevant
+    if (local.length >= 5) {
+      setSearchLoading(false)
+      return
+    }
+
+    // Debounce API call for Open Food Facts (fallback)
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
     searchTimerRef.current = setTimeout(async () => {
       setSearchLoading(true)
       try {
-        const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(q)}&json=1&page_size=8&fields=product_name,brands,nutriments&action=process`
+        const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(q)}&json=1&page_size=12&fields=product_name,brands,nutriments&action=process`
         const res = await fetch(url)
         const json = await res.json()
+        const queryLower = q.toLowerCase()
         const apiItems: FoodResult[] = (json.products ?? [])
           .filter((p: Record<string, unknown>) => {
             const n = p.nutriments as Record<string, number> | undefined
-            return n && (n['energy-kcal_100g'] ?? 0) > 0
+            const name = (p.product_name as string) || ''
+            // Reject empty / no kcal
+            if (!n || (n['energy-kcal_100g'] ?? 0) <= 0) return false
+            // Reject if name doesn't contain query (relevance)
+            if (!name.toLowerCase().includes(queryLower)) return false
+            // Reject implausible kcal range (likely bad data)
+            const kcal = n['energy-kcal_100g'] ?? 0
+            if (kcal < 5 || kcal > 900) return false
+            // Reject very long names (usually packaged junk with multi-word brands)
+            if (name.length > 60) return false
+            return true
           })
           .slice(0, 6)
           .map((p: Record<string, unknown>) => {
@@ -266,45 +290,132 @@ export default function DietPage() {
               source: 'api' as const,
             }
           })
-        // Merge: local results first, then API (excluding duplicates by name)
+        // Dedupe by name (local takes precedence)
         const localNames = new Set(local.map(f => f.name.toLowerCase()))
         const merged = [...local, ...apiItems.filter(f => !localNames.has(f.name.toLowerCase()))]
         setSearchResults(merged)
       } catch {
-        // API failed — local results are still shown
+        // API failed — local results stay
       } finally {
         setSearchLoading(false)
       }
     }, 400)
   }, [searchQuery])
 
-  // ── Quick-log a food (from search or quick-foods grid) ──────────────────
+  // ── Basket management ───────────────────────────────────────────────────
 
-  const handleQuickLog = async (food?: FoodResult, grams?: number) => {
+  const addToBasket = (food: FoodResult, grams = 100) => {
+    setBasket(prev => [...prev, {
+      id:      genId(),
+      name:    food.name,
+      brand:   food.brand,
+      per100g: food.per100g,
+      grams,
+    }])
+    setSearchQuery('')
+    setSearchResults([])
+  }
+
+  const removeFromBasket = (id: string) =>
+    setBasket(prev => prev.filter(b => b.id !== id))
+
+  const updateBasketGrams = (id: string, grams: number) =>
+    setBasket(prev => prev.map(b => b.id === id ? { ...b, grams } : b))
+
+  // ── Templates ───────────────────────────────────────────────────────────
+
+  const loadTemplates = useCallback(async () => {
     if (!userId) return
-    const f = food ?? selectedFood
-    const g = grams ?? servingGrams
-    if (!f || !g) return
+    const { data } = await supabase
+      .from('meal_templates')
+      .select('*')
+      .eq('user_id', userId)
+      .order('is_favorite', { ascending: false })
+      .order('last_used_at', { ascending: false, nullsFirst: false })
+    setTemplates((data ?? []) as MealTemplate[])
+  }, [userId, supabase])
+
+  useEffect(() => { loadTemplates() }, [loadTemplates])
+
+  const loadTemplateIntoBasket = (tpl: MealTemplate) => {
+    const items: BasketItem[] = tpl.items.map(it => ({
+      id:      genId(),
+      name:    it.food_name,
+      per100g: it.per_100g,
+      grams:   it.grams,
+    }))
+    setBasket(items)
+    if (tpl.default_meal_type) setMealType(tpl.default_meal_type)
+    setLogMode('search')  // jump to search view so user sees the basket
+  }
+
+  const saveBasketAsTemplate = async () => {
+    if (!userId || basket.length === 0 || !templateName.trim()) return
+    setSavingTemplate(true)
+    try {
+      const items = basket.map(b => ({
+        food_name: b.name,
+        grams:     b.grams,
+        per_100g:  b.per100g,
+      }))
+      await supabase.from('meal_templates').insert({
+        user_id:           userId,
+        name:              templateName.trim(),
+        default_meal_type: mealType,
+        items,
+        last_used_at:      new Date().toISOString(),
+        use_count:         0,
+      })
+      setTemplateName('')
+      setTemplatePromptOpen(false)
+      await loadTemplates()
+    } finally {
+      setSavingTemplate(false)
+    }
+  }
+
+  const toggleTemplateFavorite = async (tpl: MealTemplate) => {
+    await supabase.from('meal_templates')
+      .update({ is_favorite: !tpl.is_favorite })
+      .eq('id', tpl.id)
+    await loadTemplates()
+  }
+
+  const deleteTemplate = async (tpl: MealTemplate) => {
+    await supabase.from('meal_templates').delete().eq('id', tpl.id)
+    await loadTemplates()
+  }
+
+  // ── Log basket as N rows with shared meal_session_id ────────────────────
+
+  const logBasket = async () => {
+    if (!userId || basket.length === 0) return
     setSaving(true)
-    const scale = g / 100
-    const { error: err } = await supabase.from('meal_logs').insert({
-      user_id:   userId,
-      date:      formatDate(selectedDate),
-      meal_type: mealType,
-      food_name: f.name,
-      calories:  Math.round(f.per100g.kcal    * scale),
-      protein_g: Math.round(f.per100g.protein * scale * 10) / 10,
-      carbs_g:   Math.round(f.per100g.carbs   * scale * 10) / 10,
-      fat_g:     Math.round(f.per100g.fat     * scale * 10) / 10,
-      quantity:  `${g}g`,
-      notes:     logNotes.trim() || null,
+    setError('')
+    const sessionId = genId()
+    const rowsToInsert = basket.map(b => {
+      const scale = b.grams / 100
+      return {
+        user_id:         userId,
+        date:            formatDate(selectedDate),
+        meal_type:       mealType,
+        food_name:       b.name,
+        calories:        Math.round(b.per100g.kcal    * scale),
+        protein_g:       Math.round(b.per100g.protein * scale * 10) / 10,
+        carbs_g:         Math.round(b.per100g.carbs   * scale * 10) / 10,
+        fat_g:           Math.round(b.per100g.fat     * scale * 10) / 10,
+        quantity:        `${b.grams}g`,
+        notes:           logNotes.trim() || null,
+        meal_session_id: sessionId,
+      }
     })
+    const { error: err } = await supabase.from('meal_logs').insert(rowsToInsert)
     if (err) { setError(err.message) }
     else {
-      setSelectedFood(null)
-      setSearchQuery('')
-      setServingGrams(100)
+      setBasket([])
       setLogNotes('')
+      setSearchQuery('')
+      setEditingGramsId(null)
       await fetchMeals()
       await fetchWeekly()
     }
@@ -532,17 +643,32 @@ export default function DietPage() {
 
       {/* ── Add Meal ──────────────────────────────────────────────────── */}
       <section className="card space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <h2 className="text-lg font-semibold flex items-center gap-2">
             <Plus className="w-5 h-5 text-green-500" />
             Log Food
           </h2>
-          <button
-            onClick={() => setShowManual(m => !m)}
-            className="text-xs text-[#555] hover:text-white transition-colors"
-          >
-            {showManual ? '← Smart search' : 'Enter manually →'}
-          </button>
+          {/* Mode tabs */}
+          <div className="flex gap-1 bg-[#0e0e0e] border border-[#222] rounded-xl p-1 text-xs">
+            {([
+              { key: 'search',    label: 'Search',    icon: Search },
+              { key: 'templates', label: 'Templates', icon: Layers },
+              { key: 'manual',    label: 'Manual',    icon: Edit3 },
+            ] as { key: LogMode; label: string; icon: typeof Search }[]).map(({ key, label, icon: Icon }) => (
+              <button
+                key={key}
+                onClick={() => setLogMode(key)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-colors ${
+                  logMode === key ? 'bg-green-500/15 text-green-400' : 'text-[#666] hover:text-white'
+                }`}
+              >
+                <Icon className="w-3 h-3" /> {label}
+                {key === 'templates' && templates.length > 0 && (
+                  <span className="ml-0.5 text-[9px] bg-blue-500/20 text-blue-400 rounded-full px-1.5">{templates.length}</span>
+                )}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Meal type selector — always visible */}
@@ -562,7 +688,7 @@ export default function DietPage() {
           ))}
         </div>
 
-        {showManual ? (
+        {logMode === 'manual' && (
           /* ── Manual entry form ── */
           <form onSubmit={handleAddMeal} className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -614,22 +740,87 @@ export default function DietPage() {
               Add Meal
             </button>
           </form>
-        ) : (
-          /* ── Food search flow ── */
+        )}
+
+        {logMode === 'templates' && (
+          /* ── Templates view ── */
+          <div className="space-y-3">
+            {templates.length === 0 ? (
+              <div className="text-center py-8 text-[#555] text-sm space-y-2">
+                <Layers className="w-8 h-8 mx-auto text-[#333]" />
+                <p>No templates yet.</p>
+                <p className="text-xs text-[#444]">Build a meal in Search mode and save it as a template for one-tap logging.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {templates.map(tpl => {
+                  const totals = tpl.items.reduce((t, it) => {
+                    const s = it.grams / 100
+                    return {
+                      kcal: t.kcal + (it.per_100g.kcal ?? 0) * s,
+                      protein: t.protein + (it.per_100g.protein ?? 0) * s,
+                    }
+                  }, { kcal: 0, protein: 0 })
+                  return (
+                    <div key={tpl.id} className="bg-[#161616] border border-[#222] rounded-xl p-3 flex flex-col gap-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <p className="text-sm font-medium truncate">{tpl.name}</p>
+                            {tpl.is_favorite && <Star className="w-3 h-3 text-amber-400 fill-amber-400 shrink-0" />}
+                          </div>
+                          <p className="text-[10px] text-[#555] mt-0.5">
+                            {tpl.items.length} item{tpl.items.length !== 1 ? 's' : ''} · {Math.round(totals.kcal)} kcal · P {Math.round(totals.protein)}g
+                            {tpl.default_meal_type && ` · ${tpl.default_meal_type}`}
+                          </p>
+                        </div>
+                        <div className="flex gap-1 shrink-0">
+                          <button
+                            onClick={() => toggleTemplateFavorite(tpl)}
+                            className="text-[#444] hover:text-amber-400 p-1"
+                            title="Toggle favorite"
+                          >
+                            <Star className={`w-3.5 h-3.5 ${tpl.is_favorite ? 'fill-amber-400 text-amber-400' : ''}`} />
+                          </button>
+                          <button
+                            onClick={() => deleteTemplate(tpl)}
+                            className="text-[#444] hover:text-red-400 p-1"
+                            title="Delete template"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => loadTemplateIntoBasket(tpl)}
+                        className="btn-primary py-1.5 text-xs flex items-center justify-center gap-1.5"
+                      >
+                        <ShoppingBasket className="w-3 h-3" /> Load into basket
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {logMode === 'search' && (
+          /* ── Food search flow with multi-item basket ── */
           <div className="space-y-4">
             {/* Search bar */}
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#444]" />
               <input
                 type="text"
-                placeholder="Search food (e.g. chicken, oats, banana)…"
+                placeholder="Search food (e.g. dal, chapati, oats, paneer)…"
                 value={searchQuery}
-                onChange={e => { setSearchQuery(e.target.value); setSelectedFood(null) }}
+                onChange={e => setSearchQuery(e.target.value)}
                 className="input pl-9 pr-9"
               />
               {searchQuery && (
                 <button
-                  onClick={() => { setSearchQuery(''); setSelectedFood(null); setSearchResults([]) }}
+                  onClick={() => { setSearchQuery(''); setSearchResults([]) }}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-[#444] hover:text-white"
                 >
                   <X className="w-4 h-4" />
@@ -637,108 +828,192 @@ export default function DietPage() {
               )}
             </div>
 
-            {/* Selected food card */}
-            {selectedFood && (
-              <div className="bg-green-500/8 border border-green-500/20 rounded-xl p-4 space-y-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <p className="font-medium text-sm">{selectedFood.name}</p>
-                    {selectedFood.brand && <p className="text-[11px] text-[#555]">{selectedFood.brand}</p>}
-                    <p className="text-[11px] text-[#444] mt-0.5">
-                      Per 100g: {selectedFood.per100g.kcal} kcal · P {selectedFood.per100g.protein}g · C {selectedFood.per100g.carbs}g · F {selectedFood.per100g.fat}g
-                    </p>
-                  </div>
-                  <button onClick={() => setSelectedFood(null)} className="text-[#444] hover:text-white shrink-0">
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Grams input with live macro preview */}
-                <div className="flex items-center gap-3">
-                  <div className="flex-1">
-                    <label className="text-xs text-[#666] mb-1 block">Serving size (g)</label>
-                    <input
-                      type="number" min={1} max={2000} value={servingGrams}
-                      onChange={e => setServingGrams(Number(e.target.value) || 100)}
-                      className="input text-sm"
-                    />
-                  </div>
-                  <div className="flex gap-3 text-xs text-center">
-                    {[
-                      { label: 'kcal',    val: Math.round(selectedFood.per100g.kcal    * servingGrams / 100), color: 'text-orange-400' },
-                      { label: 'Protein', val: Math.round(selectedFood.per100g.protein * servingGrams / 10)  / 10, color: 'text-blue-400' },
-                      { label: 'Carbs',   val: Math.round(selectedFood.per100g.carbs   * servingGrams / 10)  / 10, color: 'text-yellow-400' },
-                      { label: 'Fat',     val: Math.round(selectedFood.per100g.fat     * servingGrams / 10)  / 10, color: 'text-red-400' },
-                    ].map(({ label, val, color }) => (
-                      <div key={label} className="flex flex-col gap-0.5">
-                        <span className={`font-bold text-base ${color}`}>{val}{label !== 'kcal' ? 'g' : ''}</span>
-                        <span className="text-[10px] text-[#444]">{label}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-xs text-[#666] mb-1 block">Notes (optional)</label>
-                  <input type="text" placeholder="e.g. with seasoning" value={logNotes}
-                    onChange={e => setLogNotes(e.target.value)} className="input text-sm" />
-                </div>
-
-                {error && <p className="text-red-400 text-xs bg-red-500/10 px-3 py-2 rounded-lg">{error}</p>}
-
-                <button
-                  onClick={() => handleQuickLog()}
-                  disabled={saving || !servingGrams}
-                  className="btn-primary w-full flex items-center justify-center gap-2 text-sm disabled:opacity-50"
-                >
-                  {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-                  Log {servingGrams}g of {selectedFood.name.split(' ')[0]}
-                </button>
-              </div>
-            )}
-
             {/* Search results */}
-            {!selectedFood && searchQuery && (
+            {searchQuery && (
               <div className="space-y-1">
                 {searchLoading && (
                   <div className="flex items-center gap-2 text-xs text-[#444] px-1">
-                    <Loader2 className="w-3 h-3 animate-spin" /> Searching food database…
+                    <Loader2 className="w-3 h-3 animate-spin" /> Searching online database…
                   </div>
                 )}
                 {searchResults.length > 0 ? (
                   searchResults.map((food, i) => (
                     <button
                       key={i}
-                      onClick={() => { setSelectedFood(food); setServingGrams(100) }}
+                      onClick={() => addToBasket(food, 100)}
                       className="w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl bg-[#161616] hover:bg-[#1e1e1e] border border-[#222] text-left transition-colors"
                     >
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium truncate">{food.name}</p>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-sm font-medium truncate">{food.name}</p>
+                          <span className={`text-[9px] uppercase tracking-wider px-1 rounded ${
+                            food.source === 'local' ? 'bg-emerald-500/15 text-emerald-400' : 'bg-blue-500/15 text-blue-400'
+                          }`}>
+                            {food.source === 'local' ? 'Local' : 'Online'}
+                          </span>
+                        </div>
                         {food.brand && <p className="text-[10px] text-[#444] truncate">{food.brand}</p>}
                       </div>
                       <div className="text-[11px] text-[#555] shrink-0 text-right">
                         <p className="text-orange-400 font-medium">{food.per100g.kcal} kcal</p>
                         <p>per 100g</p>
                       </div>
+                      <Plus className="w-4 h-4 text-blue-400 shrink-0" />
                     </button>
                   ))
                 ) : !searchLoading && (
-                  <p className="text-xs text-[#444] px-1">No results — try a different name or use manual entry.</p>
+                  <p className="text-xs text-[#444] px-1">No results — try a different name or use Manual mode.</p>
                 )}
               </div>
             )}
 
-            {/* Quick foods grid (when no search active) */}
-            {!searchQuery && !selectedFood && (
+            {/* Basket — multi-item composer */}
+            {basket.length > 0 && (() => {
+              const totals = basketTotals(basket)
+              return (
+                <div className="bg-green-500/8 border border-green-500/20 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <ShoppingBasket className="w-4 h-4 text-green-400" />
+                    <p className="text-sm font-semibold text-green-400">Building {mealType}</p>
+                    <p className="ml-auto text-[11px] text-[#555]">{basket.length} item{basket.length !== 1 ? 's' : ''}</p>
+                  </div>
+
+                  {/* Items */}
+                  <div className="space-y-1">
+                    {basket.map(item => {
+                      const s = item.grams / 100
+                      const editing = editingGramsId === item.id
+                      return (
+                        <div key={item.id} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[#0e0e0e] border border-[#1a1a1a]">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-medium truncate">{item.name}</p>
+                            <p className="text-[10px] text-[#555]">
+                              {Math.round(item.per100g.kcal * s)} kcal · P {Math.round(item.per100g.protein * s * 10) / 10}g
+                            </p>
+                          </div>
+                          {editing ? (
+                            <input
+                              type="number"
+                              min={1}
+                              max={2000}
+                              value={item.grams}
+                              autoFocus
+                              onBlur={() => setEditingGramsId(null)}
+                              onChange={e => updateBasketGrams(item.id, Number(e.target.value) || 100)}
+                              onKeyDown={e => { if (e.key === 'Enter') setEditingGramsId(null) }}
+                              className="input text-xs w-20 py-1 text-right"
+                            />
+                          ) : (
+                            <button
+                              onClick={() => setEditingGramsId(item.id)}
+                              className="text-xs text-blue-400 hover:text-blue-300 font-mono px-2"
+                            >
+                              {item.grams}g
+                            </button>
+                          )}
+                          <button
+                            onClick={() => removeFromBasket(item.id)}
+                            className="text-[#555] hover:text-red-400 p-0.5"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {/* Totals */}
+                  <div className="flex gap-3 text-xs text-center pt-2 border-t border-green-500/15">
+                    {[
+                      { label: 'kcal',    val: Math.round(totals.kcal),                color: 'text-orange-400' },
+                      { label: 'Protein', val: Math.round(totals.protein * 10) / 10,   color: 'text-blue-400' },
+                      { label: 'Carbs',   val: Math.round(totals.carbs   * 10) / 10,   color: 'text-yellow-400' },
+                      { label: 'Fat',     val: Math.round(totals.fat     * 10) / 10,   color: 'text-red-400' },
+                    ].map(({ label, val, color }) => (
+                      <div key={label} className="flex-1">
+                        <p className={`font-bold text-base ${color}`}>{val}{label !== 'kcal' ? 'g' : ''}</p>
+                        <p className="text-[10px] text-[#444]">{label}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Notes */}
+                  <input
+                    type="text"
+                    placeholder="Notes (optional)"
+                    value={logNotes}
+                    onChange={e => setLogNotes(e.target.value)}
+                    className="input text-xs"
+                  />
+
+                  {error && <p className="text-red-400 text-xs bg-red-500/10 px-3 py-2 rounded-lg">{error}</p>}
+
+                  {/* Save as template prompt */}
+                  {templatePromptOpen ? (
+                    <div className="flex items-center gap-2 bg-blue-500/8 border border-blue-500/20 rounded-lg p-2">
+                      <input
+                        type="text"
+                        placeholder="Template name (e.g. Daily Breakfast)"
+                        value={templateName}
+                        onChange={e => setTemplateName(e.target.value)}
+                        className="input text-xs flex-1"
+                        autoFocus
+                      />
+                      <button
+                        onClick={saveBasketAsTemplate}
+                        disabled={savingTemplate || !templateName.trim()}
+                        className="btn-primary text-xs py-1.5 px-3 disabled:opacity-50"
+                      >
+                        {savingTemplate ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Save'}
+                      </button>
+                      <button
+                        onClick={() => { setTemplatePromptOpen(false); setTemplateName('') }}
+                        className="btn-secondary text-xs py-1.5 px-3"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setTemplatePromptOpen(true)}
+                      className="text-[11px] text-[#666] hover:text-blue-400 flex items-center gap-1"
+                    >
+                      <BookmarkPlus className="w-3 h-3" /> Save this meal as a template
+                    </button>
+                  )}
+
+                  {/* Action buttons */}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => { setBasket([]); setLogNotes('') }}
+                      className="btn-secondary flex-1 text-sm"
+                    >
+                      Clear
+                    </button>
+                    <button
+                      onClick={logBasket}
+                      disabled={saving}
+                      className="btn-primary flex-1 text-sm flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                      {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                      Log {mealType}
+                    </button>
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* Quick foods grid (when no search active and basket empty) */}
+            {!searchQuery && basket.length === 0 && (
               <div>
                 <p className="text-xs text-[#444] mb-2 flex items-center gap-1.5">
-                  <Zap className="w-3 h-3 text-blue-400" /> Quick foods — tap to select
+                  <Zap className="w-3 h-3 text-blue-400" /> Quick foods — tap to add to basket
                 </p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   {QUICK_FOODS.map((food, i) => (
                     <button
                       key={i}
-                      onClick={() => { setSelectedFood(food); setServingGrams(100) }}
+                      onClick={() => addToBasket(foodItemToResult(food), food.portions?.[0]?.grams ?? 100)}
                       className="flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-xl bg-[#161616] border border-[#222] hover:border-[#333] hover:bg-[#1a1a1a] text-left transition-colors"
                     >
                       <p className="text-xs font-medium leading-tight truncate w-full">{food.name}</p>
@@ -746,6 +1021,9 @@ export default function DietPage() {
                     </button>
                   ))}
                 </div>
+                <p className="text-[10px] text-[#444] text-center mt-3">
+                  Tap multiple foods to build a meal · search for 200+ more (incl. Indian dishes)
+                </p>
               </div>
             )}
           </div>

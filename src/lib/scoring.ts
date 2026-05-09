@@ -1,4 +1,4 @@
-import type { DailyLog, LeaderboardMember, ActivityLevel, GoalType, WeeklyScore, BadgeType } from './types'
+import type { DailyLog, LeaderboardMember, ActivityLevel, GoalType, WeeklyScore, WeeklyArchive, BadgeType } from './types'
 
 // ── TDEE engine ────────────────────────────────────────────────────
 
@@ -79,8 +79,9 @@ export function calculateWeeklyScore(
   const consistency = clamp(activeDays / 7)
 
   // 4. Goal progress (10%) — weight moving in the right direction
-  const startW = member.start_weight_kg
-  const currW  = member.current_weight_kg
+  // Fall back to profile.weight_kg so new members aren't stuck at neutral 0.5.
+  const startW = member.start_weight_kg ?? profile.weight_kg
+  const currW  = member.current_weight_kg ?? profile.weight_kg
   let progress = 0.5  // neutral when no weight data
   if (startW !== null && currW !== null && startW !== 0) {
     const delta = currW - startW
@@ -196,6 +197,46 @@ export function scoreColorClass(score: number): string {
 }
 
 export const REACTION_EMOJIS = ['🔥', '💪', '👑', '🎉', '⚡', '😤', '🙌', '🫡']
+
+// ── Goal progress (LB-6) ───────────────────────────────────────────────────
+
+/**
+ * Returns 0–100 percent of distance traveled from start weight to target weight.
+ * Returns null if any of start/target/current are missing.
+ */
+export function goalProgressPct(member: LeaderboardMember): number | null {
+  const start  = member.start_weight_kg
+  const target = member.target_weight_kg
+  const curr   = member.current_weight_kg
+  if (start == null || target == null || curr == null) return null
+  if (start === target) return 100
+  const total = Math.abs(target - start)
+  // For "cut" goals (target < start), positive progress when current < start.
+  // For "bulk" goals (target > start), positive progress when current > start.
+  const goingDown = target < start
+  const moved = goingDown ? Math.max(0, start - curr) : Math.max(0, curr - start)
+  return Math.min(100, Math.round((moved / total) * 100))
+}
+
+// ── Score trend (LB-7) ─────────────────────────────────────────────────────
+
+export type ScoreTrend = 'up' | 'down' | 'flat'
+
+/** Compare current week score to most recent archived week's score for same user. */
+export function scoreTrend(
+  userId:        string,
+  currentScore:  number,
+  archives:      WeeklyArchive[]
+): ScoreTrend | null {
+  if (archives.length === 0) return null
+  // Archives sorted desc by week_start in caller — pick first.
+  const last = archives[0]
+  const prev = last?.scores[userId]?.total
+  if (prev == null) return null
+  if (currentScore > prev + 2) return 'up'
+  if (currentScore < prev - 2) return 'down'
+  return 'flat'
+}
 
 const MEMBER_COLORS = [
   '#3b82f6', '#10b981', '#f59e0b', '#a78bfa',

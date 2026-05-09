@@ -75,6 +75,53 @@ export interface MealLog {
   quantity: string | null
   notes: string | null
   created_at: string
+  meal_session_id: string | null
+}
+
+// Per-100g macro values (kcal + grams of P/C/F)
+export interface Macros100g {
+  kcal:    number
+  protein: number
+  carbs:   number
+  fat:     number
+}
+
+// Item in a multi-item meal basket / template (computed at log time)
+export interface BasketItem {
+  id:      string
+  name:    string
+  brand?:  string
+  per100g: Macros100g
+  grams:   number
+}
+
+// JSONB items inside meal_templates.items
+export interface TemplateItem {
+  food_name: string
+  grams:     number
+  per_100g:  Macros100g
+}
+
+export interface MealTemplate {
+  id:                string
+  user_id:           string
+  name:              string
+  default_meal_type: string | null
+  items:             TemplateItem[]
+  is_favorite:       boolean
+  use_count:         number
+  last_used_at:      string | null
+  created_at:        string
+}
+
+export interface FoodFavorite {
+  id:           string
+  user_id:      string
+  food_name:    string
+  per_100g:     Macros100g
+  use_count:    number
+  last_used_at: string | null
+  created_at:   string
 }
 
 export interface ProgressLog {
@@ -135,13 +182,15 @@ export interface DailyLog {
 }
 
 export interface Leaderboard {
-  id:          string
-  created_by:  string
-  name:        string
-  description: string | null
-  invite_code: string
-  is_active:   boolean
-  created_at:  string
+  id:           string
+  created_by:   string
+  name:         string
+  description:  string | null
+  invite_code:  string
+  is_active:    boolean
+  auto_archive: boolean
+  is_public:    boolean
+  created_at:   string
 }
 
 export interface LeaderboardMember {
