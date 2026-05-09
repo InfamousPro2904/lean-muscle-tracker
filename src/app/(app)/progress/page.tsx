@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { createClient } from '@/lib/supabase'
 import { ProgressLog } from '@/lib/types'
+import { todayIsoLocal, toIsoLocal } from '@/lib/week'
 import {
   TrendingUp,
   TrendingDown,
@@ -34,7 +35,7 @@ export default function ProgressPage() {
   const [timeRange, setTimeRange] = useState<TimeRange>('90')
 
   // Form state
-  const [date, setDate] = useState(() => new Date().toISOString().split('T')[0])
+  const [date, setDate] = useState(() => todayIsoLocal())
   const [weightKg, setWeightKg] = useState('')
   const [bodyFatPct, setBodyFatPct] = useState('')
   const [chestCm, setChestCm] = useState('')
@@ -105,7 +106,7 @@ export default function ProgressPage() {
       setArmsCm('')
       setThighsCm('')
       setNotes('')
-      setDate(new Date().toISOString().split('T')[0])
+      setDate(todayIsoLocal())
       await fetchLogs()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save progress')
@@ -137,7 +138,7 @@ export default function ProgressPage() {
     const days = parseInt(timeRange)
     const cutoff = new Date()
     cutoff.setDate(cutoff.getDate() - days)
-    const cutoffStr = cutoff.toISOString().split('T')[0]
+    const cutoffStr = toIsoLocal(cutoff)
 
     return logs.filter((log) => log.date >= cutoffStr)
   }, [logs, timeRange])

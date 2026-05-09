@@ -10,7 +10,7 @@ import {
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase'
 import type { Profile, MealLog, WorkoutLog, ProgressLog, DailyLog } from '@/lib/types'
-import { getWeekStartIso } from '@/lib/week'
+import { getWeekStartIso, getWeekEndIso, todayIsoLocal, formatWeekRange } from '@/lib/week'
 import { MUSCLE_GROUPS as PRESET_GROUPS } from '@/lib/exercise-presets'
 import {
   LEAN_MUSCLE_ROUTINE_NAME,
@@ -251,8 +251,10 @@ export default function DashboardPage() {
 
   const [profile, setProfile] = useState<Profile | null>(null)
   const [todayMeals, setTodayMeals] = useState<MealLog[]>([])
+  const [weekMeals, setWeekMeals] = useState<MealLog[]>([])
   const [weekWorkouts, setWeekWorkouts] = useState<WorkoutLog[]>([])
   const [todayDailyLog, setTodayDailyLog] = useState<DailyLog | null>(null)
+  const [weekDailyLogs, setWeekDailyLogs] = useState<DailyLog[]>([])
   const [latestProgress, setLatestProgress] = useState<ProgressLog | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -273,24 +275,29 @@ export default function DashboardPage() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    const today = new Date().toISOString().split('T')[0]
-    const weekStart = getWeekStartIso()  // Mon-Sun week
+    const today     = todayIsoLocal()
+    const weekStart = getWeekStartIso()
+    const weekEnd   = getWeekEndIso(weekStart)
 
-    const [profileRes, mealsRes, workoutsRes, progressRes, dailyLogRes] = await Promise.all([
+    const [profileRes, todayMealsRes, weekMealsRes, workoutsRes, progressRes, todayDailyRes, weekDailyRes] = await Promise.all([
       supabase.from('profiles').select('*').eq('id', user.id).single(),
       supabase.from('meal_logs').select('*').eq('user_id', user.id).eq('date', today),
+      supabase.from('meal_logs').select('*').eq('user_id', user.id).gte('date', weekStart).lte('date', weekEnd),
       supabase.from('workout_logs').select('*, exercise_logs(*)').eq('user_id', user.id)
-        .gte('date', weekStart).order('date', { ascending: false }),
+        .gte('date', weekStart).lte('date', weekEnd).order('date', { ascending: false }),
       supabase.from('progress_logs').select('*').eq('user_id', user.id)
         .order('date', { ascending: false }).limit(1).single(),
       supabase.from('daily_logs').select('*').eq('user_id', user.id).eq('date', today).maybeSingle(),
+      supabase.from('daily_logs').select('*').eq('user_id', user.id).gte('date', weekStart).lte('date', weekEnd),
     ])
 
     if (profileRes.data) setProfile(profileRes.data)
-    if (mealsRes.data) setTodayMeals(mealsRes.data)
+    if (todayMealsRes.data) setTodayMeals(todayMealsRes.data)
+    if (weekMealsRes.data)  setWeekMeals(weekMealsRes.data as MealLog[])
     if (workoutsRes.data) setWeekWorkouts(workoutsRes.data)
     if (progressRes.data) setLatestProgress(progressRes.data)
-    if (dailyLogRes.data) setTodayDailyLog(dailyLogRes.data as DailyLog)
+    if (todayDailyRes.data) setTodayDailyLog(todayDailyRes.data as DailyLog)
+    if (weekDailyRes.data) setWeekDailyLogs(weekDailyRes.data as DailyLog[])
     setLoading(false)
   }, [supabase])
 
@@ -464,10 +471,64 @@ export default function DashboardPage() {
           </p>
           <p className="text-[10px] text-[#555] mt-1">
             {latestProgress?.weight_kg ? 'kg' : 'No data'}
-            {latestProgress?.date && ` · ${new Date(latestProgress.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}
+            {latestProgress?.date && ` · ${new Date(latestProgress.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}
           </p>
         </div>
       </div>
+
+      {/* ── This Week Summary ── */}
+      {(() => {
+        const weekStart    = getWeekStartIso()
+        const totalKcalIn  = weekMeals.reduce((s, m) => s + (m.calories ?? 0), 0)
+        const totalKcalOut = weekDailyLogs.reduce((s, d) => s + (d.kcal_burnt ?? 0), 0)
+        const activeDates  = new Set([
+          ...weekDailyLogs.filter(d => d.workout_done || d.kcal_in > 0 || d.is_rest_day).map(d => d.date),
+          ...weekMeals.map(m => m.date),
+          ...weekWorkouts.map(w => w.date),
+        ])
+        const today = todayIsoLocal()
+        const dayOfWeek = (() => {
+          const d = new Date()
+          return d.getDay() === 0 ? 7 : d.getDay()  // Mon=1..Sun=7
+        })()
+        const avgDailyKcal = totalKcalIn > 0 ? Math.round(totalKcalIn / Math.max(1, activeDates.size)) : 0
+        return (
+          <section className="card space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <h2 className="text-sm font-semibold flex items-center gap-2">
+                <Activity className="w-4 h-4 text-blue-400" />
+                This Week
+              </h2>
+              <p className="text-[11px] text-[#666]">
+                {formatWeekRange(weekStart)} · Day {dayOfWeek} of 7
+                {today && <span className="text-[#444]"> · today</span>}
+              </p>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="bg-[#0e0e0e] rounded-xl p-3 text-center">
+                <p className="text-[10px] text-[#666] uppercase tracking-wider mb-1">Workouts</p>
+                <p className="text-2xl font-bold">{weekWorkouts.length}</p>
+                <p className="text-[10px] text-[#555]">sessions</p>
+              </div>
+              <div className="bg-[#0e0e0e] rounded-xl p-3 text-center">
+                <p className="text-[10px] text-[#666] uppercase tracking-wider mb-1">Burnt</p>
+                <p className="text-2xl font-bold text-emerald-400">{totalKcalOut}</p>
+                <p className="text-[10px] text-[#555]">kcal</p>
+              </div>
+              <div className="bg-[#0e0e0e] rounded-xl p-3 text-center">
+                <p className="text-[10px] text-[#666] uppercase tracking-wider mb-1">Calories in</p>
+                <p className="text-2xl font-bold text-orange-400">{totalKcalIn}</p>
+                <p className="text-[10px] text-[#555]">{avgDailyKcal > 0 ? `avg ${avgDailyKcal}/day` : 'kcal'}</p>
+              </div>
+              <div className="bg-[#0e0e0e] rounded-xl p-3 text-center">
+                <p className="text-[10px] text-[#666] uppercase tracking-wider mb-1">Active days</p>
+                <p className="text-2xl font-bold text-blue-400">{activeDates.size}</p>
+                <p className="text-[10px] text-[#555]">/ {dayOfWeek} so far</p>
+              </div>
+            </div>
+          </section>
+        )
+      })()}
 
       {/* ── Macro progress bars ── */}
       <div className="card">

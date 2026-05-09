@@ -21,7 +21,7 @@ import {
   BookOpen, Check, Undo2, AlertTriangle, Coffee, Flame
 } from 'lucide-react'
 import { estimateWorkoutKcal } from '@/lib/kcal'
-import { getIsoWeekNumber, getIsoWeekYear, getWeekStartIso, formatWeekRange } from '@/lib/week'
+import { getIsoWeekNumber, getIsoWeekYear, getWeekStartIso, formatWeekRange, todayIsoLocal } from '@/lib/week'
 import PresetPicker, { type PresetSelection } from '@/components/workouts/PresetPicker'
 
 type Tab = 'routines' | 'log' | 'history'
@@ -100,7 +100,7 @@ export default function WorkoutsPage() {
   // ─── Log Workout State ───
   const [selectedRoutineId, setSelectedRoutineId] = useState<string>('')
   const [customWorkoutName, setCustomWorkoutName] = useState('')
-  const [logDate, setLogDate] = useState(new Date().toISOString().split('T')[0])
+  const [logDate, setLogDate] = useState(todayIsoLocal())
   const [logDuration, setLogDuration] = useState<number | ''>('')
   const [logNotes, setLogNotes] = useState('')
   const [exerciseEntries, setExerciseEntries] = useState<ExerciseLogEntry[]>([])
@@ -511,7 +511,7 @@ export default function WorkoutsPage() {
       }
 
       setSelectedRoutineId(''); setCustomWorkoutName('')
-      setLogDate(new Date().toISOString().split('T')[0]); setLogDuration('')
+      setLogDate(todayIsoLocal()); setLogDuration('')
       setLogNotes(''); setExerciseEntries([]); setIsRestDay(false)
       setSavingLog(false); fetchHistory(); setActiveTab('history')
       return
@@ -600,7 +600,7 @@ export default function WorkoutsPage() {
     }
 
     setSelectedRoutineId(''); setCustomWorkoutName('')
-    setLogDate(new Date().toISOString().split('T')[0]); setLogDuration('')
+    setLogDate(todayIsoLocal()); setLogDuration('')
     setLogNotes(''); setExerciseEntries([]); setIsRestDay(false)
     setSavingLog(false); fetchHistory(); setActiveTab('history')
   }

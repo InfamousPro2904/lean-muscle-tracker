@@ -12,6 +12,7 @@
 
 import { createClient } from './supabase'
 import { estimateWorkoutKcal, type ExerciseSummary } from './kcal'
+import { daysAgoIsoLocal } from './week'
 import type { ExerciseLog } from './types'
 
 export interface BackfillResult {
@@ -32,7 +33,7 @@ export async function backfillDailyLogs(
   daysBack       = 90,
 ): Promise<BackfillResult> {
   const supabase = createClient()
-  const since = new Date(Date.now() - daysBack * 86400_000).toISOString().split('T')[0]
+  const since = daysAgoIsoLocal(daysBack)
 
   const [workoutsRes, mealsRes, dailyRes] = await Promise.all([
     supabase

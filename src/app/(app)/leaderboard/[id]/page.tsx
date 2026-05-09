@@ -19,6 +19,7 @@ import {
   memberColor, scoreColorClass, REACTION_EMOJIS,
   goalProgressPct, scoreTrend,
 } from '@/lib/scoring'
+import { toIsoLocal, daysAgoIsoLocal } from '@/lib/week'
 import MemberSettingsModal from '@/components/leaderboard/MemberSettingsModal'
 import LeaderboardManageModal from '@/components/leaderboard/LeaderboardManageModal'
 import NotificationsPanel from '@/components/leaderboard/NotificationsPanel'
@@ -224,7 +225,7 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
       .lte('date', weekEnd)
 
     // Fetch recent logs (90 days) for streak calculation
-    const ninetyAgo = new Date(Date.now() - 90 * 864e5).toISOString().split('T')[0]
+    const ninetyAgo = daysAgoIsoLocal(90)
     const { data: recentLogs } = await supabase
       .from('daily_logs')
       .select('user_id, date')
@@ -386,7 +387,7 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
     // Compute last week (Mon to Sun before this week's Mon)
     const lastWeekStartDate = new Date(weekStart)
     lastWeekStartDate.setDate(lastWeekStartDate.getDate() - 7)
-    const lastWeekStartIso = lastWeekStartDate.toISOString().split('T')[0]
+    const lastWeekStartIso = toIsoLocal(lastWeekStartDate)
     const lastWeekEndIso   = getWeekEnd(lastWeekStartIso)
 
     if (archives.some(a => a.week_start === lastWeekStartIso)) return  // already archived

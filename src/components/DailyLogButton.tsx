@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { Plus, X, Flame, Dumbbell, Coffee, FileText, CheckCircle2, Loader2, Zap } from 'lucide-react'
 import { createClient } from '@/lib/supabase'
 import type { DailyLog } from '@/lib/types'
+import { todayIsoLocal } from '@/lib/week'
 
 type FormState = {
   kcal_in:      number
@@ -30,7 +31,7 @@ export default function DailyLogButton() {
   const [existing, setExisting] = useState<DailyLog | null>(null)
   const [suggest,  setSuggest]  = useState<{ kcal_in: number; kcal_burnt: number; workout_done: boolean } | null>(null)
 
-  const today = new Date().toISOString().split('T')[0]
+  const today = todayIsoLocal()
   const todayLabel = new Date().toLocaleDateString('en-US', {
     weekday: 'long', month: 'long', day: 'numeric',
   })

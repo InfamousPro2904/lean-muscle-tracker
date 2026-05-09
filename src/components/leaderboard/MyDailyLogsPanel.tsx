@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Edit3, Trash2, Save, Loader2, Coffee, Dumbbell } from 'lucide-react'
 import { createClient } from '@/lib/supabase'
 import type { DailyLog } from '@/lib/types'
+import { toIsoLocal, todayIsoLocal, daysAgoIsoLocal } from '@/lib/week'
 
 interface Props {
   weekStart: string  // ISO date YYYY-MM-DD
@@ -23,7 +24,7 @@ function buildWeekCells(weekStart: string, logs: DailyLog[]): DayCell[] {
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date(start)
     d.setDate(start.getDate() + i)
-    const iso = d.toISOString().split('T')[0]
+    const iso = toIsoLocal(d)
     return {
       date: iso,
       log:  logs.find(l => l.date === iso) ?? null,
@@ -33,8 +34,8 @@ function buildWeekCells(weekStart: string, logs: DailyLog[]): DayCell[] {
 
 function formatDayLabel(iso: string): string {
   const d = new Date(iso + 'T12:00:00')
-  const today = new Date().toISOString().split('T')[0]
-  const yest  = new Date(Date.now() - 86400_000).toISOString().split('T')[0]
+  const today = todayIsoLocal()
+  const yest  = daysAgoIsoLocal(1)
   if (iso === today) return 'Today'
   if (iso === yest)  return 'Yesterday'
   return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })

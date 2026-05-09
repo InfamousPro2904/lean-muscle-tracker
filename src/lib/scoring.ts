@@ -1,4 +1,5 @@
 import type { DailyLog, LeaderboardMember, ActivityLevel, GoalType, WeeklyScore, WeeklyArchive, BadgeType } from './types'
+import { toIsoLocal } from './week'
 
 // ── TDEE engine ────────────────────────────────────────────────────
 
@@ -126,7 +127,7 @@ export function calculateStreak(logs: DailyLog[]): number {
   const cursor = new Date(today)
 
   while (true) {
-    const dateStr = cursor.toISOString().split('T')[0]
+    const dateStr = toIsoLocal(cursor)
     if (!loggedSet.has(dateStr)) break
     streak++
     cursor.setDate(cursor.getDate() - 1)
@@ -163,24 +164,23 @@ export const ACTIVITY_LABELS: Record<ActivityLevel, { label: string; description
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-/** Get the ISO date string for the most-recent Monday. */
+/** Get the local-date string for the most-recent Monday. */
 export function getWeekStart(from: Date = new Date()): string {
   const d = new Date(from)
-  const day = d.getDay()               // 0=Sun … 6=Sat
+  const day = d.getDay()               // 0=Sun … 6=Sat (LOCAL)
   const diff = day === 0 ? -6 : 1 - day  // shift to Monday
-  d.setDate(d.getDate() + diff)
-  d.setHours(0, 0, 0, 0)
-  return d.toISOString().split('T')[0]
+  d.setDate(d.getDate() + diff)        // LOCAL day arithmetic
+  return toIsoLocal(d)                 // LOCAL date format
 }
 
 export function getWeekEnd(weekStart: string): string {
-  const d = new Date(weekStart)
+  const d = new Date(weekStart + 'T12:00:00')
   d.setDate(d.getDate() + 6)
-  return d.toISOString().split('T')[0]
+  return toIsoLocal(d)
 }
 
 export function formatWeekLabel(weekStart: string): string {
-  const d = new Date(weekStart)
+  const d = new Date(weekStart + 'T12:00:00')
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 

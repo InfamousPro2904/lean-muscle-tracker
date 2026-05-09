@@ -13,6 +13,7 @@ import {
   generateInviteCode, calculateStreak,
   GOAL_LABELS, ACTIVITY_LABELS,
 } from '@/lib/scoring'
+import { todayIsoLocal, daysAgoIsoLocal } from '@/lib/week'
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -399,8 +400,8 @@ export default function LeaderboardListPage() {
       .select('*')
       .in('id', lbIds)
 
-    const today     = new Date().toISOString().split('T')[0]
-    const ninetyAgo = new Date(Date.now() - 90 * 864e5).toISOString().split('T')[0]
+    const today     = todayIsoLocal()
+    const ninetyAgo = daysAgoIsoLocal(90)
 
     const { data: myLogs } = await supabase
       .from('daily_logs')

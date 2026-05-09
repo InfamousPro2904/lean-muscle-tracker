@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { createClient } from '@/lib/supabase'
 import { MealLog, Profile, MEAL_TYPES, MealTemplate, BasketItem, Macros100g } from '@/lib/types'
 import { QUICK_FOODS, searchFoods, type FoodItem } from '@/lib/foods'
-import { getWeekStartIso, getWeekEndIso } from '@/lib/week'
+import { getWeekStartIso, getWeekEndIso, toIsoLocal, daysAgoIsoLocal } from '@/lib/week'
 import FoodItemEditor, { type EditableFood } from '@/components/diet/FoodItemEditor'
 import TemplateEditorModal from '@/components/diet/TemplateEditorModal'
 import {
@@ -39,7 +39,7 @@ import {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatDate(d: Date): string {
-  return d.toISOString().split('T')[0]
+  return toIsoLocal(d)
 }
 
 function displayDate(d: Date): string {
@@ -253,10 +253,15 @@ export default function DietPage() {
     }
 
     setWeeklyData(
-      Object.entries(map).map(([date, calories]) => ({
-        day: new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' }),
-        calories,
-      }))
+      Object.entries(map).map(([date, calories]) => {
+        const d = new Date(date + 'T12:00:00')
+        const weekday = d.toLocaleDateString('en-US', { weekday: 'short' })
+        const dayNum  = d.getDate()
+        return {
+          day: `${weekday} ${dayNum}`,  // e.g. "Tue 5"
+          calories,
+        }
+      })
     )
   }, [userId, selectedDate, supabase])
 
@@ -377,7 +382,7 @@ export default function DietPage() {
 
   const loadRecentFoods = useCallback(async () => {
     if (!userId) return
-    const thirtyAgo = new Date(Date.now() - 30 * 86400_000).toISOString().split('T')[0]
+    const thirtyAgo = daysAgoIsoLocal(30)
     const { data } = await supabase
       .from('meal_logs')
       .select('food_name, calories, protein_g, carbs_g, fat_g, quantity')
@@ -1400,10 +1405,19 @@ export default function DietPage() {
 
       {/* ── Weekly Calorie Overview ───────────────────────────────────── */}
       <section className="card space-y-4">
-        <h2 className="text-lg font-semibold flex items-center gap-2">
-          <Flame className="w-5 h-5 text-orange-400" />
-          Weekly Calorie Overview
-        </h2>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h2 className="text-lg font-semibold flex items-center gap-2">
+            <Flame className="w-5 h-5 text-orange-400" />
+            Weekly Calorie Overview
+          </h2>
+          <p className="text-xs text-[#666]">
+            Mon {(() => {
+              const ws = new Date(getWeekStartIso(selectedDate) + 'T12:00:00')
+              const we = new Date(getWeekEndIso(getWeekStartIso(selectedDate)) + 'T12:00:00')
+              return `${ws.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – Sun ${we.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+            })()}
+          </p>
+        </div>
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={weeklyData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
