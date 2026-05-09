@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { createClient } from '@/lib/supabase'
 import { MealLog, Profile, MEAL_TYPES, MealTemplate, BasketItem, Macros100g } from '@/lib/types'
 import { QUICK_FOODS, searchFoods, type FoodItem } from '@/lib/foods'
+import { getWeekStartIso, getWeekEndIso } from '@/lib/week'
 import FoodItemEditor, { type EditableFood } from '@/components/diet/FoodItemEditor'
 import TemplateEditorModal from '@/components/diet/TemplateEditorModal'
 import {
@@ -226,20 +227,21 @@ export default function DietPage() {
 
   const fetchWeekly = useCallback(async () => {
     if (!userId) return
-    const end = new Date(selectedDate)
-    const start = new Date(selectedDate)
-    start.setDate(start.getDate() - 6)
+    // Mon-Sun week containing selectedDate (ISO 8601, app-wide)
+    const startIso = getWeekStartIso(selectedDate)
+    const endIso   = getWeekEndIso(startIso)
 
     const { data } = await supabase
       .from('meal_logs')
       .select('date, calories')
       .eq('user_id', userId)
-      .gte('date', formatDate(start))
-      .lte('date', formatDate(end))
+      .gte('date', startIso)
+      .lte('date', endIso)
 
     if (!data) return
 
     const map: Record<string, number> = {}
+    const start = new Date(startIso + 'T12:00:00')
     for (let i = 0; i < 7; i++) {
       const d = new Date(start)
       d.setDate(d.getDate() + i)

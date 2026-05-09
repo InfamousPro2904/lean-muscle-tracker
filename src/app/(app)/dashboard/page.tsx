@@ -9,7 +9,8 @@ import {
   AlertCircle, Loader2
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase'
-import type { Profile, MealLog, WorkoutLog, ProgressLog } from '@/lib/types'
+import type { Profile, MealLog, WorkoutLog, ProgressLog, DailyLog } from '@/lib/types'
+import { getWeekStartIso } from '@/lib/week'
 import { MUSCLE_GROUPS as PRESET_GROUPS } from '@/lib/exercise-presets'
 import {
   LEAN_MUSCLE_ROUTINE_NAME,
@@ -251,6 +252,7 @@ export default function DashboardPage() {
   const [profile, setProfile] = useState<Profile | null>(null)
   const [todayMeals, setTodayMeals] = useState<MealLog[]>([])
   const [weekWorkouts, setWeekWorkouts] = useState<WorkoutLog[]>([])
+  const [todayDailyLog, setTodayDailyLog] = useState<DailyLog | null>(null)
   const [latestProgress, setLatestProgress] = useState<ProgressLog | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -272,25 +274,25 @@ export default function DashboardPage() {
     if (!user) return
 
     const today = new Date().toISOString().split('T')[0]
-    const startOfWeek = new Date()
-    startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay())
-    const weekStart = startOfWeek.toISOString().split('T')[0]
+    const weekStart = getWeekStartIso()  // Mon-Sun week
 
-    const [profileRes, mealsRes, workoutsRes, progressRes] = await Promise.all([
+    const [profileRes, mealsRes, workoutsRes, progressRes, dailyLogRes] = await Promise.all([
       supabase.from('profiles').select('*').eq('id', user.id).single(),
       supabase.from('meal_logs').select('*').eq('user_id', user.id).eq('date', today),
       supabase.from('workout_logs').select('*, exercise_logs(*)').eq('user_id', user.id)
         .gte('date', weekStart).order('date', { ascending: false }),
       supabase.from('progress_logs').select('*').eq('user_id', user.id)
         .order('date', { ascending: false }).limit(1).single(),
+      supabase.from('daily_logs').select('*').eq('user_id', user.id).eq('date', today).maybeSingle(),
     ])
 
     if (profileRes.data) setProfile(profileRes.data)
     if (mealsRes.data) setTodayMeals(mealsRes.data)
     if (workoutsRes.data) setWeekWorkouts(workoutsRes.data)
     if (progressRes.data) setLatestProgress(progressRes.data)
+    if (dailyLogRes.data) setTodayDailyLog(dailyLogRes.data as DailyLog)
     setLoading(false)
-  }, [])
+  }, [supabase])
 
   useEffect(() => { fetchData() }, [fetchData])
 
@@ -405,16 +407,30 @@ export default function DashboardPage() {
       </div>
 
       {/* ── Quick stat cards ── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Calories */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        {/* Calories in */}
         <div className="card flex items-center gap-4">
           <RingProgress percent={calPct} color="#3b82f6">
             <span className="text-[10px] font-bold text-white">{calPct}%</span>
           </RingProgress>
           <div>
-            <p className="text-xs text-[#555] flex items-center gap-1"><Flame className="w-3 h-3 text-orange-400" /> Calories</p>
+            <p className="text-xs text-[#555] flex items-center gap-1"><Flame className="w-3 h-3 text-orange-400" /> Calories in</p>
             <p className="text-xl font-bold mt-0.5">{todayCalories}</p>
             <p className="text-[10px] text-[#555]">/ {calTarget} kcal</p>
+          </div>
+        </div>
+
+        {/* Calories burnt (auto-fed by workout logs via daily_logs) */}
+        <div className="card flex items-center gap-4">
+          <div className="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center shrink-0">
+            <Activity className="w-5 h-5 text-emerald-400" />
+          </div>
+          <div>
+            <p className="text-xs text-[#555] flex items-center gap-1"><Flame className="w-3 h-3 text-emerald-400" /> Burnt today</p>
+            <p className="text-xl font-bold mt-0.5">{todayDailyLog?.kcal_burnt ?? 0}</p>
+            <p className="text-[10px] text-[#555]">
+              {todayDailyLog?.workout_done ? '✓ Workout logged' : 'kcal'}
+            </p>
           </div>
         </div>
 

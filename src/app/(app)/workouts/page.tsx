@@ -18,8 +18,10 @@ import {
 import {
   Dumbbell, Plus, Trash2, ChevronDown, ChevronUp,
   Clock, Calendar, ClipboardList, History, Save, X, Loader2,
-  BookOpen, Check, Undo2, AlertTriangle, Coffee
+  BookOpen, Check, Undo2, AlertTriangle, Coffee, Flame
 } from 'lucide-react'
+import { estimateWorkoutKcal } from '@/lib/kcal'
+import { getIsoWeekNumber, getIsoWeekYear, getWeekStartIso, formatWeekRange } from '@/lib/week'
 import PresetPicker, { type PresetSelection } from '@/components/workouts/PresetPicker'
 
 type Tab = 'routines' | 'log' | 'history'
@@ -78,6 +80,7 @@ export default function WorkoutsPage() {
 
   const [activeTab, setActiveTab] = useState<Tab>('routines')
   const [userId, setUserId] = useState<string | null>(null)
+  const [bodyWeightKg, setBodyWeightKg] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
 
   // ─── Routines State ───
@@ -107,6 +110,8 @@ export default function WorkoutsPage() {
   // ─── History State ───
   const [workoutLogs, setWorkoutLogs] = useState<WorkoutLog[]>([])
   const [expandedLog, setExpandedLog] = useState<string | null>(null)
+  const [historyView, setHistoryView] = useState<'list' | 'weeks'>('weeks')
+  const [collapsedWeeks, setCollapsedWeeks] = useState<Set<string>>(new Set())
 
   // ─── Delete confirmation + undo ───
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
@@ -114,13 +119,22 @@ export default function WorkoutsPage() {
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const undoIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // ─── Auth ───
+  // ─── Auth + body weight (for accurate kcal estimation) ───
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (user) setUserId(user.id)
+    (async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (user) {
+        setUserId(user.id)
+        const { data: prof } = await supabase
+          .from('profiles')
+          .select('weight_kg')
+          .eq('id', user.id)
+          .single()
+        if (prof?.weight_kg) setBodyWeightKg(Number(prof.weight_kg))
+      }
       setLoading(false)
-    })
-  }, [supabase.auth])
+    })()
+  }, [supabase])
 
   // ─── Handle preset selection from URL params ───
   const handlePresetQuery = useCallback((name: string, muscle: string, sets: string, reps: string) => {
@@ -540,12 +554,18 @@ export default function WorkoutsPage() {
     await supabase.from('exercise_logs').insert(exerciseLogsToInsert)
 
     // ─── Auto-sync to daily_logs (for leaderboard scoring) ─────────────────
-    // Estimate kcal_burnt: prefer duration-based (5 kcal/min for moderate
-    // weight training). Fall back to set count (4 kcal/set) if no duration.
-    const totalSets = exerciseEntries.reduce((s, e) => s + e.sets.length, 0)
-    const estimatedKcal = logDuration && Number(logDuration) > 0
-      ? Math.round(Number(logDuration) * 5)
-      : Math.round(totalSets * 4)
+    // MET-based scientific kcal estimation from src/lib/kcal.ts.
+    const estimate = estimateWorkoutKcal(
+      exerciseEntries.map(e => ({
+        exercise_name: e.exercise_name,
+        muscle_group:  e.muscle_group,
+        sets:          e.sets.map(s => ({ reps: s.reps, weight_kg: s.weight_kg })),
+      })),
+      logDuration ? Number(logDuration) : null,
+      bodyWeightKg,
+      false,
+    )
+    const estimatedKcal = estimate.kcal
 
     if (estimatedKcal > 0) {
       const { data: existingDaily } = await supabase
@@ -1096,6 +1116,32 @@ export default function WorkoutsPage() {
             </div>
           ))}
 
+          {/* Live kcal-burn estimate */}
+          {!isRestDay && exerciseEntries.length > 0 && (() => {
+            const est = estimateWorkoutKcal(
+              exerciseEntries.map(e => ({
+                exercise_name: e.exercise_name,
+                muscle_group:  e.muscle_group,
+                sets:          e.sets.map(s => ({ reps: s.reps, weight_kg: s.weight_kg })),
+              })),
+              logDuration ? Number(logDuration) : null,
+              bodyWeightKg,
+              false,
+            )
+            return (
+              <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-orange-500/8 border border-orange-500/20">
+                <Flame className="w-5 h-5 text-orange-400 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-orange-400">≈ {est.kcal} kcal will be logged</p>
+                  <p className="text-[10px] text-[#666] mt-0.5">
+                    {est.notes}
+                    {!bodyWeightKg && ' · using default 70 kg (set body weight in profile for accuracy)'}
+                  </p>
+                </div>
+              </div>
+            )
+          })()}
+
           <div className="flex gap-3 flex-wrap">
             <button
               onClick={() => {
@@ -1132,105 +1178,185 @@ export default function WorkoutsPage() {
       )}
 
       {/* ═══════════════════ TAB 3: HISTORY ═══════════════════ */}
-      {activeTab === 'history' && (
-        <div className="space-y-3">
-          {workoutLogs.length === 0 ? (
-            <div className="card text-center py-12">
-              <History className="w-12 h-12 text-[#333] mx-auto mb-3" />
-              <p className="text-[#555]">No workouts logged yet. Hit the gym and come back!</p>
-            </div>
-          ) : (
-            workoutLogs.map(log => (
-              <div key={log.id} className="card">
-                <div className="flex items-start justify-between">
-                  <div
-                    className="flex-1 cursor-pointer"
-                    onClick={() => setExpandedLog(expandedLog === log.id ? null : log.id)}
-                  >
-                    <div className="flex items-center gap-3">
-                      <h3 className="font-semibold">{log.workout_name}</h3>
-                    </div>
-                    <div className="flex items-center gap-4 mt-1.5 text-sm text-[#666]">
-                      <span className="flex items-center gap-1">
-                        <Calendar className="w-3.5 h-3.5" />
-                        {new Date(log.date).toLocaleDateString('en-US', {
-                          weekday: 'short', month: 'short', day: 'numeric', year: 'numeric'
-                        })}
-                      </span>
-                      {log.duration_minutes && (
-                        <span className="flex items-center gap-1">
-                          <Clock className="w-3.5 h-3.5" />{log.duration_minutes} min
-                        </span>
-                      )}
-                      <span className="flex items-center gap-1">
-                        <Dumbbell className="w-3.5 h-3.5" />
-                        {new Set(log.exercise_logs?.map(e => e.exercise_name)).size || 0} exercises
-                      </span>
-                    </div>
-                    {log.notes && <p className="text-sm text-[#555] mt-1">{log.notes}</p>}
-                  </div>
-
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => setExpandedLog(expandedLog === log.id ? null : log.id)}
-                      className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-[#1e1e1e] transition-all"
-                    >
-                      {expandedLog === log.id
-                        ? <ChevronUp className="w-4 h-4" />
-                        : <ChevronDown className="w-4 h-4" />}
-                    </button>
-
-                    {confirmDeleteId === log.id ? (
-                      <InlineConfirm
-                        label="Delete log?"
-                        onConfirm={() => confirmDeleteLog(log)}
-                        onCancel={cancelDelete}
-                      />
-                    ) : (
-                      <button
-                        onClick={() => requestDelete(log.id)}
-                        className="text-[#555] hover:text-red-400 p-1.5 rounded-lg hover:bg-red-500/8 transition-all"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
+      {activeTab === 'history' && (() => {
+        // Render a single workout-log card (shared by both views)
+        const renderLogCard = (log: WorkoutLog) => (
+          <div key={log.id} className="card">
+            <div className="flex items-start justify-between">
+              <div
+                className="flex-1 cursor-pointer"
+                onClick={() => setExpandedLog(expandedLog === log.id ? null : log.id)}
+              >
+                <div className="flex items-center gap-3">
+                  <h3 className="font-semibold">{log.workout_name}</h3>
                 </div>
+                <div className="flex items-center gap-4 mt-1.5 text-sm text-[#666] flex-wrap">
+                  <span className="flex items-center gap-1">
+                    <Calendar className="w-3.5 h-3.5" />
+                    {new Date(log.date).toLocaleDateString('en-US', {
+                      weekday: 'short', month: 'short', day: 'numeric', year: 'numeric'
+                    })}
+                  </span>
+                  {log.duration_minutes && (
+                    <span className="flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5" />{log.duration_minutes} min
+                    </span>
+                  )}
+                  <span className="flex items-center gap-1">
+                    <Dumbbell className="w-3.5 h-3.5" />
+                    {new Set(log.exercise_logs?.map(e => e.exercise_name)).size || 0} exercises
+                  </span>
+                </div>
+                {log.notes && <p className="text-sm text-[#555] mt-1">{log.notes}</p>}
+              </div>
 
-                {expandedLog === log.id && log.exercise_logs && (
-                  <div className="mt-4 pt-4 border-t border-[#1e1e1e] space-y-3">
-                    {(() => {
-                      const grouped: Record<string, ExerciseLog[]> = {}
-                      log.exercise_logs.forEach(el => {
-                        if (!grouped[el.exercise_name]) grouped[el.exercise_name] = []
-                        grouped[el.exercise_name].push(el)
-                      })
-                      return Object.entries(grouped).map(([name, sets]) => (
-                        <div key={name} className="bg-[#161616] border border-[#1e1e1e] rounded-xl px-4 py-3">
-                          <div className="flex items-center justify-between mb-2">
-                            <p className="font-medium text-sm">{name}</p>
-                            <span className="badge badge-blue">{sets[0]?.muscle_group}</span>
-                          </div>
-                          <div className="grid grid-cols-3 gap-2 text-xs text-[#555] mb-1">
-                            <span>Set</span><span>Reps</span><span>Weight</span>
-                          </div>
-                          {sets.map(s => (
-                            <div key={s.id} className="grid grid-cols-3 gap-2 text-sm py-0.5">
-                              <span className="text-[#666]">{s.set_number}</span>
-                              <span>{s.reps ?? '–'}</span>
-                              <span>{s.weight_kg != null ? `${s.weight_kg} kg` : '–'}</span>
-                            </div>
-                          ))}
-                        </div>
-                      ))
-                    })()}
-                  </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setExpandedLog(expandedLog === log.id ? null : log.id)}
+                  className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-[#1e1e1e] transition-all"
+                >
+                  {expandedLog === log.id
+                    ? <ChevronUp className="w-4 h-4" />
+                    : <ChevronDown className="w-4 h-4" />}
+                </button>
+
+                {confirmDeleteId === log.id ? (
+                  <InlineConfirm
+                    label="Delete log?"
+                    onConfirm={() => confirmDeleteLog(log)}
+                    onCancel={cancelDelete}
+                  />
+                ) : (
+                  <button
+                    onClick={() => requestDelete(log.id)}
+                    className="text-[#555] hover:text-red-400 p-1.5 rounded-lg hover:bg-red-500/8 transition-all"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
                 )}
               </div>
-            ))
-          )}
-        </div>
-      )}
+            </div>
+
+            {expandedLog === log.id && log.exercise_logs && (
+              <div className="mt-4 pt-4 border-t border-[#1e1e1e] space-y-3">
+                {(() => {
+                  const grouped: Record<string, ExerciseLog[]> = {}
+                  log.exercise_logs.forEach(el => {
+                    if (!grouped[el.exercise_name]) grouped[el.exercise_name] = []
+                    grouped[el.exercise_name].push(el)
+                  })
+                  return Object.entries(grouped).map(([name, sets]) => (
+                    <div key={name} className="bg-[#161616] border border-[#1e1e1e] rounded-xl px-4 py-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="font-medium text-sm">{name}</p>
+                        <span className="badge badge-blue">{sets[0]?.muscle_group}</span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 text-xs text-[#555] mb-1">
+                        <span>Set</span><span>Reps</span><span>Weight</span>
+                      </div>
+                      {sets.map(s => (
+                        <div key={s.id} className="grid grid-cols-3 gap-2 text-sm py-0.5">
+                          <span className="text-[#666]">{s.set_number}</span>
+                          <span>{s.reps ?? '–'}</span>
+                          <span>{s.weight_kg != null ? `${s.weight_kg} kg` : '–'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ))
+                })()}
+              </div>
+            )}
+          </div>
+        )
+
+        // Group logs by year-week ("2026-W19") for the "weeks" view.
+        const weekGroups = workoutLogs.reduce((acc, log) => {
+          const yr = getIsoWeekYear(log.date)
+          const wk = getIsoWeekNumber(log.date)
+          const weekStart = getWeekStartIso(log.date)
+          const key = `${yr}-W${String(wk).padStart(2, '0')}`
+          if (!acc[key]) acc[key] = { weekStart, logs: [] }
+          acc[key].logs.push(log)
+          return acc
+        }, {} as Record<string, { weekStart: string; logs: WorkoutLog[] }>)
+        // Sort week keys descending
+        const sortedWeekKeys = Object.keys(weekGroups).sort((a, b) => b.localeCompare(a))
+
+        return (
+          <div className="space-y-3">
+            {/* View toggle */}
+            {workoutLogs.length > 0 && (
+              <div className="flex gap-1 bg-[#0e0e0e] border border-[#222] rounded-xl p-1">
+                <button
+                  onClick={() => setHistoryView('weeks')}
+                  className={`flex-1 py-2 rounded-lg text-xs font-medium transition-colors ${
+                    historyView === 'weeks' ? 'bg-blue-500/15 text-blue-400' : 'text-[#666] hover:text-white'
+                  }`}
+                >
+                  By Week
+                </button>
+                <button
+                  onClick={() => setHistoryView('list')}
+                  className={`flex-1 py-2 rounded-lg text-xs font-medium transition-colors ${
+                    historyView === 'list' ? 'bg-blue-500/15 text-blue-400' : 'text-[#666] hover:text-white'
+                  }`}
+                >
+                  By Date
+                </button>
+              </div>
+            )}
+
+            {workoutLogs.length === 0 ? (
+              <div className="card text-center py-12">
+                <History className="w-12 h-12 text-[#333] mx-auto mb-3" />
+                <p className="text-[#555]">No workouts logged yet. Hit the gym and come back!</p>
+              </div>
+            ) : historyView === 'list' ? (
+              workoutLogs.map(renderLogCard)
+            ) : (
+              sortedWeekKeys.map(key => {
+                const grp = weekGroups[key]
+                const collapsed = collapsedWeeks.has(key)
+                const totalSessions = grp.logs.length
+                const totalDuration = grp.logs.reduce((s, l) => s + (l.duration_minutes ?? 0), 0)
+                const totalExercises = grp.logs.reduce(
+                  (s, l) => s + (new Set(l.exercise_logs?.map(e => e.exercise_name)).size || 0), 0)
+                return (
+                  <div key={key} className="space-y-2">
+                    <button
+                      onClick={() => {
+                        setCollapsedWeeks(prev => {
+                          const next = new Set(prev)
+                          if (next.has(key)) next.delete(key)
+                          else next.add(key)
+                          return next
+                        })
+                      }}
+                      className="w-full flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-[#111] border border-[#1e1e1e] hover:border-[#2a2a2a] transition-colors"
+                    >
+                      <div className="text-left">
+                        <p className="text-sm font-bold">{key}</p>
+                        <p className="text-[11px] text-[#666] mt-0.5">{formatWeekRange(grp.weekStart)}</p>
+                      </div>
+                      <div className="flex items-center gap-3 text-[11px] text-[#666]">
+                        <span><span className="text-white font-semibold">{totalSessions}</span> session{totalSessions !== 1 ? 's' : ''}</span>
+                        <span><span className="text-white font-semibold">{totalDuration}</span>min</span>
+                        <span><span className="text-white font-semibold">{totalExercises}</span> ex</span>
+                        {collapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                      </div>
+                    </button>
+                    {!collapsed && (
+                      <div className="space-y-2 pl-2 border-l-2 border-blue-500/15 ml-3">
+                        {grp.logs.map(renderLogCard)}
+                      </div>
+                    )}
+                  </div>
+                )
+              })
+            )}
+          </div>
+        )
+      })()}
 
       {/* ═══════════════════ UNDO TOAST ═══════════════════ */}
       {undoPending && (

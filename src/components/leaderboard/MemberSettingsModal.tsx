@@ -2,10 +2,11 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { X, Loader2, AlertCircle, LogOut } from 'lucide-react'
+import { X, Loader2, AlertCircle, LogOut, Download, CheckCircle2 } from 'lucide-react'
 import { createClient } from '@/lib/supabase'
 import type { LeaderboardMember, GoalType, ActivityLevel } from '@/lib/types'
 import { GOAL_LABELS, ACTIVITY_LABELS } from '@/lib/scoring'
+import { backfillDailyLogs, type BackfillResult } from '@/lib/backfill'
 
 interface Props {
   member:    LeaderboardMember
@@ -27,6 +28,9 @@ export default function MemberSettingsModal({ member, onClose, onUpdated }: Prop
   const [error,         setError]         = useState('')
   const [confirmLeave,  setConfirmLeave]  = useState(false)
   const [leaving,       setLeaving]       = useState(false)
+  const [importing,     setImporting]     = useState(false)
+  const [importResult,  setImportResult]  = useState<BackfillResult | null>(null)
+  const [importError,   setImportError]   = useState('')
 
   const save = async () => {
     setSaving(true)
@@ -59,6 +63,36 @@ export default function MemberSettingsModal({ member, onClose, onUpdated }: Prop
       router.push('/leaderboard')
     } finally {
       setLeaving(false)
+    }
+  }
+
+  const importHistory = async () => {
+    setImporting(true)
+    setImportError('')
+    setImportResult(null)
+    try {
+      // Use member's current_weight_kg if set, otherwise pull profile.weight_kg
+      let bodyWeight = member.current_weight_kg ?? member.start_weight_kg ?? null
+      if (!bodyWeight) {
+        const { data: { user } } = await supabase.auth.getUser()
+        if (user) {
+          const { data: prof } = await supabase
+            .from('profiles')
+            .select('weight_kg')
+            .eq('id', user.id)
+            .single()
+          if (prof?.weight_kg) bodyWeight = Number(prof.weight_kg)
+        }
+      }
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error('Not authenticated')
+      const result = await backfillDailyLogs(user.id, bodyWeight, 90)
+      setImportResult(result)
+      onUpdated()
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : 'Import failed')
+    } finally {
+      setImporting(false)
     }
   }
 
@@ -168,6 +202,46 @@ export default function MemberSettingsModal({ member, onClose, onUpdated }: Prop
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
             Save
           </button>
+        </div>
+
+        {/* Import historical workouts + nutrition into daily_logs */}
+        <div className="pt-4 border-t border-[#1a1a1a] space-y-2">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-blue-400 flex items-center gap-1.5">
+            <Download className="w-3 h-3" /> Import existing data
+          </p>
+          {importResult ? (
+            <div className="bg-emerald-500/8 border border-emerald-500/20 rounded-xl p-3 text-xs space-y-1">
+              <p className="flex items-center gap-1.5 text-emerald-400 font-semibold">
+                <CheckCircle2 className="w-3.5 h-3.5" /> Imported successfully
+              </p>
+              <p className="text-[#888]">
+                {importResult.daysCreated} new day{importResult.daysCreated !== 1 ? 's' : ''} created
+                {importResult.daysUpdated > 0 && `, ${importResult.daysUpdated} updated`}
+                {' '}across {importResult.scannedDates} date{importResult.scannedDates !== 1 ? 's' : ''}.
+              </p>
+              <p className="text-[#666]">
+                Total: {importResult.totalKcalIn} kcal in · {importResult.totalKcalBurnt} kcal burnt
+              </p>
+            </div>
+          ) : (
+            <>
+              <p className="text-[11px] text-[#666] leading-relaxed">
+                Pull your last 90 days of workout & nutrition history into the leaderboard.
+                Calories burnt are estimated from your logged sets using a MET formula
+                ({(member.current_weight_kg ?? member.start_weight_kg ?? 70)} kg body weight).
+                Existing user-set values won&apos;t be reduced.
+              </p>
+              <button
+                onClick={importHistory}
+                disabled={importing}
+                className="w-full flex items-center justify-center gap-2 text-xs py-2 px-3 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-400 hover:bg-blue-500/20 disabled:opacity-50"
+              >
+                {importing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                {importing ? 'Importing 90 days…' : 'Import last 90 days into leaderboard'}
+              </button>
+              {importError && <p className="text-[10px] text-red-400">{importError}</p>}
+            </>
+          )}
         </div>
 
         {/* Leave leaderboard — danger zone */}
