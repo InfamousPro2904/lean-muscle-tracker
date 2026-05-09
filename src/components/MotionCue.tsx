@@ -4,7 +4,6 @@ import type { MotionType } from '@/lib/exercise-presets'
 
 type Props = {
   motion: MotionType
-  name: string
   className?: string
 }
 
@@ -12,7 +11,7 @@ const BLUE = '#3b82f6'
 const BLUE_DIM = 'rgba(59,130,246,0.15)'
 const AMBER = '#f59e0b'
 
-export default function MotionCue({ motion, name, className = '' }: Props) {
+export default function MotionCue({ motion, className = '' }: Props) {
   return (
     <div className={`flex flex-col items-center gap-2 ${className}`}>
       <div className="w-24 h-24 rounded-2xl bg-[#0e0e0e] border border-[#1e1e1e] flex items-center justify-center overflow-hidden">

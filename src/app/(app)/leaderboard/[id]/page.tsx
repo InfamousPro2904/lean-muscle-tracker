@@ -1,0 +1,792 @@
+'use client'
+
+import { useState, useEffect, useCallback, use } from 'react'
+import {
+  Users, Hash, Copy, Check, Flame, Crown, Loader2,
+  ChevronDown, ChevronUp, Medal, Star, X, AlertCircle,
+  Archive, RefreshCw,
+} from 'lucide-react'
+import {
+  LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
+  ResponsiveContainer, CartesianGrid, Legend,
+} from 'recharts'
+import { createClient } from '@/lib/supabase'
+import type { Leaderboard, LeaderboardMember, DailyLog, WeeklyArchive, WeeklyScore, Badge, Reaction } from '@/lib/types'
+import {
+  calculateWeeklyScore, calculateStreak, getWeekStart, getWeekEnd,
+  formatWeekLabel, BADGE_DEFINITIONS, GOAL_LABELS, ACTIVITY_LABELS,
+  memberColor, scoreColorClass, REACTION_EMOJIS,
+} from '@/lib/scoring'
+
+// ── Sub-types ──────────────────────────────────────────────────────
+
+interface MemberRow extends LeaderboardMember {
+  score:    WeeklyScore
+  streak:   number
+  badges:   Badge[]
+  logs:     DailyLog[]
+}
+
+type Tab = 'week' | 'monthly' | 'yearly' | 'archives'
+
+// ── Confetti ───────────────────────────────────────────────────────
+
+function Confetti() {
+  const colors = ['#3b82f6', '#f59e0b', '#ef4444', '#10b981', '#a78bfa', '#f97316', '#ec4899']
+  const pieces = Array.from({ length: 48 }, (_, i) => ({
+    id:    i,
+    color: colors[i % colors.length],
+    left:  `${(i / 48) * 105 - 2}%`,
+    delay: `${(i % 8) * 0.15}s`,
+    dur:   `${2.5 + (i % 5) * 0.3}s`,
+    size:  i % 3 === 0 ? '10px' : '7px',
+    shape: i % 4 === 0 ? '50%' : '2px',
+  }))
+
+  return (
+    <>
+      <style>{`
+        @keyframes confettiDrop {
+          0%   { transform: translateY(-20px) rotate(0deg);   opacity: 1; }
+          80%  { opacity: 1; }
+          100% { transform: translateY(110vh) rotate(720deg); opacity: 0; }
+        }
+      `}</style>
+      <div className="fixed inset-0 pointer-events-none z-50 overflow-hidden">
+        {pieces.map(p => (
+          <div
+            key={p.id}
+            style={{
+              position:        'absolute',
+              top:             '-10px',
+              left:            p.left,
+              width:           p.size,
+              height:          p.size,
+              backgroundColor: p.color,
+              borderRadius:    p.shape,
+              animation:       `confettiDrop ${p.dur} ${p.delay} ease-in forwards`,
+            }}
+          />
+        ))}
+      </div>
+    </>
+  )
+}
+
+// ── Score breakdown bar ────────────────────────────────────────────
+
+function ScoreBreakdown({ score }: { score: WeeklyScore }) {
+  const bars = [
+    { label: 'Adherence', value: score.adherence,   color: '#3b82f6', pct: 40 },
+    { label: 'Burnt',     value: score.burnt,        color: '#10b981', pct: 30 },
+    { label: 'Consistent',value: score.consistency,  color: '#f59e0b', pct: 20 },
+    { label: 'Progress',  value: score.progress,     color: '#a78bfa', pct: 10 },
+  ]
+  return (
+    <div className="space-y-1.5">
+      {bars.map(b => (
+        <div key={b.label} className="flex items-center gap-2">
+          <span className="text-[10px] text-[#555] w-18 shrink-0">{b.label}</span>
+          <div className="flex-1 h-1.5 bg-[#1a1a1a] rounded-full overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all duration-700"
+              style={{ width: `${b.value}%`, backgroundColor: b.color }}
+            />
+          </div>
+          <span className="text-[10px] text-[#555] w-8 text-right">{b.value}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ── Reaction buttons ───────────────────────────────────────────────
+
+function ReactionBar({
+  targetUserId,
+  reactions,
+  myUserId,
+  onToggle,
+}: {
+  targetUserId: string
+  reactions:    Reaction[]
+  myUserId:     string
+  onToggle:     (emoji: string, has: boolean) => void
+}) {
+  const counts = REACTION_EMOJIS.reduce<Record<string, { count: number; mine: boolean }>>(
+    (acc, e) => {
+      const mine  = reactions.some(r => r.emoji === e && r.from_user_id === myUserId && r.target_user_id === targetUserId)
+      const count = reactions.filter(r => r.emoji === e && r.target_user_id === targetUserId).length
+      if (count > 0 || mine) acc[e] = { count, mine }
+      return acc
+    },
+    {}
+  )
+
+  return (
+    <div className="flex flex-wrap gap-1.5 mt-2">
+      {REACTION_EMOJIS.map(e => {
+        const entry = counts[e]
+        const mine  = entry?.mine ?? false
+        const count = entry?.count ?? 0
+        return (
+          <button
+            key={e}
+            onClick={() => onToggle(e, mine)}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border transition-all ${
+              mine
+                ? 'bg-blue-500/15 border-blue-500/30 text-blue-400'
+                : count > 0
+                  ? 'bg-[#1a1a1a] border-[#2a2a2a] text-[#666] hover:border-[#333] hover:text-white'
+                  : 'bg-transparent border-[#222] text-[#444] hover:border-[#2a2a2a] hover:text-[#777]'
+            }`}
+          >
+            {e}{count > 0 && <span className="ml-0.5">{count}</span>}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+// ── Update weight modal ────────────────────────────────────────────
+
+function UpdateWeightModal({
+  memberId,
+  current,
+  onClose,
+  onUpdated,
+}: {
+  memberId:  string
+  current:   number | null
+  onClose:   () => void
+  onUpdated: (w: number) => void
+}) {
+  const supabase = createClient()
+  const [val,    setVal]    = useState(current?.toString() ?? '')
+  const [saving, setSaving] = useState(false)
+
+  const save = async () => {
+    setSaving(true)
+    const w = parseFloat(val)
+    if (!isNaN(w) && w > 0) {
+      await supabase
+        .from('leaderboard_members')
+        .update({ current_weight_kg: w })
+        .eq('id', memberId)
+      onUpdated(w)
+    }
+    setSaving(false)
+    onClose()
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-xs bg-[#111] border border-[#222] rounded-3xl p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="font-semibold text-sm">Update Current Weight</h3>
+          <button onClick={onClose} className="text-[#555] hover:text-white"><X className="w-4 h-4" /></button>
+        </div>
+        <input
+          type="number"
+          value={val}
+          onChange={e => setVal(e.target.value)}
+          placeholder="kg"
+          className="input text-center"
+          autoFocus
+        />
+        <button
+          onClick={save}
+          disabled={saving || !val}
+          className="btn-primary w-full flex items-center justify-center gap-2 disabled:opacity-50"
+        >
+          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+          Save
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Main page ──────────────────────────────────────────────────────
+
+export default function LeaderboardDetailPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = use(params)
+  const supabase  = createClient()
+
+  const [lb,       setLb]       = useState<Leaderboard | null>(null)
+  const [myId,     setMyId]     = useState<string>('')
+  const [myMem,    setMyMem]    = useState<LeaderboardMember | null>(null)
+  const [rows,     setRows]     = useState<MemberRow[]>([])
+  const [archives, setArchives] = useState<WeeklyArchive[]>([])
+  const [reactions,setReactions]= useState<Reaction[]>([])
+  const [allBadges,setAllBadges]= useState<Badge[]>([])
+  const [loading,  setLoading]  = useState(true)
+  const [tab,      setTab]      = useState<Tab>('week')
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [copied,   setCopied]   = useState(false)
+  const [archiving,setArchiving]= useState(false)
+  const [archErr,  setArchErr]  = useState('')
+  const [showWtModal,  setShowWtModal]  = useState(false)
+  const [showConfetti, setShowConfetti] = useState(false)
+
+  const weekStart = getWeekStart()
+  const weekEnd   = getWeekEnd(weekStart)
+
+  const load = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    setMyId(user.id)
+
+    const [lbRes, memRes, archRes] = await Promise.all([
+      supabase.from('leaderboards').select('*').eq('id', id).single(),
+      supabase.from('leaderboard_members').select('*, profiles(full_name, weight_kg, height_cm, age)').eq('leaderboard_id', id),
+      supabase.from('weekly_archives').select('*').eq('leaderboard_id', id).order('week_start', { ascending: false }).limit(52),
+    ])
+
+    if (!lbRes.data) { setLoading(false); return }
+    setLb(lbRes.data as Leaderboard)
+    setArchives((archRes.data ?? []) as WeeklyArchive[])
+
+    const members = (memRes.data ?? []) as (LeaderboardMember & { profiles: { full_name: string; weight_kg: number | null; height_cm: number | null; age: number | null } })[]
+    const memberIds = members.map(m => m.user_id)
+    const me = members.find(m => m.user_id === user.id)
+    if (me) setMyMem(me)
+
+    // Fetch this week's logs for all members
+    const { data: logs } = await supabase
+      .from('daily_logs')
+      .select('*')
+      .in('user_id', memberIds)
+      .gte('date', weekStart)
+      .lte('date', weekEnd)
+
+    // Fetch recent logs (90 days) for streak calculation
+    const ninetyAgo = new Date(Date.now() - 90 * 864e5).toISOString().split('T')[0]
+    const { data: recentLogs } = await supabase
+      .from('daily_logs')
+      .select('user_id, date')
+      .in('user_id', memberIds)
+      .gte('date', ninetyAgo)
+
+    // Fetch badges
+    const { data: badgesData } = await supabase
+      .from('badges')
+      .select('*')
+      .eq('leaderboard_id', id)
+
+    setAllBadges((badgesData ?? []) as Badge[])
+
+    // Fetch reactions on archives
+    if ((archRes.data ?? []).length > 0) {
+      const archiveIds = (archRes.data ?? []).map((a: { id: string }) => a.id)
+      const { data: rxns } = await supabase
+        .from('reactions')
+        .select('*')
+        .in('archive_id', archiveIds)
+      setReactions((rxns ?? []) as Reaction[])
+    }
+
+    // Build MemberRow list
+    const memberRows: MemberRow[] = members.map(mem => {
+      const profile = mem.profiles
+      const memberLogs     = (logs ?? []).filter(l => l.user_id === mem.user_id)
+      const memberAllLogs  = (recentLogs ?? []).filter(l => l.user_id === mem.user_id)
+      const score          = calculateWeeklyScore(mem, memberLogs as DailyLog[], profile)
+      const streak         = calculateStreak(memberAllLogs as DailyLog[])
+      const memberBadges   = (badgesData ?? []).filter((b: Badge) => b.user_id === mem.user_id) as Badge[]
+
+      return {
+        ...mem,
+        profile: { full_name: profile.full_name, weight_kg: profile.weight_kg, height_cm: profile.height_cm, age: profile.age },
+        score,
+        streak,
+        badges:  memberBadges,
+        logs:    memberLogs as DailyLog[],
+      }
+    }).sort((a, b) => b.score.total - a.score.total)
+
+    setRows(memberRows)
+
+    // Confetti: if current user is top scorer this week
+    const myRow = memberRows.find(r => r.user_id === user.id)
+    if (myRow && memberRows[0]?.user_id === user.id && memberRows.length > 1 && myRow.score.total > 0) {
+      setShowConfetti(true)
+      setTimeout(() => setShowConfetti(false), 4000)
+    }
+
+    setLoading(false)
+  }, [supabase, id, weekStart, weekEnd])
+
+  useEffect(() => { load() }, [load])
+
+  const copyCode = () => {
+    if (!lb) return
+    navigator.clipboard.writeText(lb.invite_code)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  // Archive current week
+  const archiveWeek = async () => {
+    if (!lb) return
+    setArchiving(true)
+    setArchErr('')
+    try {
+      const winner = rows[0]?.user_id ?? null
+      const scores: Record<string, WeeklyScore> = {}
+      rows.forEach(r => { scores[r.user_id] = r.score })
+
+      const { error } = await supabase.from('weekly_archives').insert({
+        leaderboard_id: lb.id,
+        week_start:     weekStart,
+        week_end:       weekEnd,
+        winner_user_id: winner,
+        scores,
+      })
+
+      if (error) {
+        if (error.message.includes('unique') || error.message.includes('duplicate')) {
+          setArchErr('This week is already archived.')
+        } else {
+          setArchErr(error.message)
+        }
+        return
+      }
+
+      // Award badges
+      const notifInserts: unknown[] = []
+      if (winner) {
+        await supabase.from('badges').upsert({ user_id: winner, leaderboard_id: lb.id, badge_type: 'week_winner', meta: { week: weekStart } })
+        notifInserts.push({ user_id: winner, type: 'week_winner', title: '👑 You won the week!', body: `You topped ${lb.name} for the week of ${formatWeekLabel(weekStart)}.`, data: { leaderboard_id: lb.id } })
+      }
+      rows.forEach(r => {
+        if (r.score.total >= 100) {
+          supabase.from('badges').upsert({ user_id: r.user_id, leaderboard_id: lb.id, badge_type: 'century', meta: {} })
+        } else if (r.score.total >= 80) {
+          supabase.from('badges').upsert({ user_id: r.user_id, leaderboard_id: lb.id, badge_type: 'top_scorer', meta: {} })
+        }
+        const activeDays = r.logs.filter(l => l.workout_done || l.is_rest_day || l.kcal_in > 0).length
+        if (activeDays >= 5) {
+          supabase.from('badges').upsert({ user_id: r.user_id, leaderboard_id: lb.id, badge_type: 'consistent', meta: {} })
+        }
+      })
+
+      if (notifInserts.length > 0) {
+        await supabase.from('notifications').insert(notifInserts)
+      }
+
+      await load()
+    } finally {
+      setArchiving(false)
+    }
+  }
+
+  const toggleReaction = async (archiveId: string, targetUserId: string, emoji: string, hasIt: boolean) => {
+    if (!myId) return
+    if (hasIt) {
+      await supabase.from('reactions').delete()
+        .eq('archive_id', archiveId).eq('target_user_id', targetUserId)
+        .eq('from_user_id', myId).eq('emoji', emoji)
+    } else {
+      await supabase.from('reactions').insert({ archive_id: archiveId, target_user_id: targetUserId, from_user_id: myId, emoji })
+    }
+    // Refresh reactions
+    const archiveIds = archives.map(a => a.id)
+    const { data } = await supabase.from('reactions').select('*').in('archive_id', archiveIds)
+    setReactions((data ?? []) as Reaction[])
+  }
+
+  const updateMyWeight = async (w: number) => {
+    if (!myMem) return
+    setMyMem(prev => prev ? { ...prev, current_weight_kg: w } : prev)
+    setRows(prev => prev.map(r =>
+      r.user_id === myId
+        ? { ...r, current_weight_kg: w, score: calculateWeeklyScore({ ...r, current_weight_kg: w }, r.logs, r.profile ?? { weight_kg: null, height_cm: null, age: null }) }
+        : r
+    ).sort((a, b) => b.score.total - a.score.total))
+  }
+
+  // ── Chart data ───────────────────────────────────────────────────
+
+  const buildMonthlyData = () => {
+    const data: Record<string, number>[] = []
+    const last4 = [...archives].slice(0, 4).reverse()
+    last4.forEach(arch => {
+      const point: Record<string, number> = { week: new Date(arch.week_start).getTime() }
+      Object.entries(arch.scores).forEach(([uid, s]) => { point[uid] = s.total })
+      data.push(point)
+    })
+    // Add current live week
+    const livePoint: Record<string, number> = { week: new Date(weekStart).getTime() }
+    rows.forEach(r => { livePoint[r.user_id] = r.score.total })
+    data.push(livePoint)
+    return data
+  }
+
+  const buildYearlyData = () => {
+    if (archives.length === 0) return []
+    // Group by month
+    const monthMap: Record<string, { sum: Record<string, number>; count: number }> = {}
+    archives.forEach(arch => {
+      const month = arch.week_start.slice(0, 7) // YYYY-MM
+      if (!monthMap[month]) monthMap[month] = { sum: {}, count: 0 }
+      monthMap[month].count++
+      Object.entries(arch.scores).forEach(([uid, s]) => {
+        monthMap[month].sum[uid] = (monthMap[month].sum[uid] ?? 0) + s.total
+      })
+    })
+    return Object.entries(monthMap).map(([month, { sum, count }]) => {
+      const point: Record<string, unknown> = { month: new Date(month + '-01').toLocaleDateString('en-US', { month: 'short' }) }
+      Object.entries(sum).forEach(([uid, total]) => { point[uid] = Math.round((total as number) / count) })
+      return point
+    })
+  }
+
+  // ── Render ────────────────────────────────────────────────────────
+
+  if (loading) return (
+    <div className="flex items-center justify-center min-h-[60vh]">
+      <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+    </div>
+  )
+
+  if (!lb) return (
+    <div className="max-w-xl mx-auto pt-16 text-center">
+      <AlertCircle className="w-10 h-10 text-red-400 mx-auto mb-3" />
+      <p className="text-[#555]">Leaderboard not found.</p>
+    </div>
+  )
+
+  const isCreator = lb.created_by === myId
+  const monthlyData = buildMonthlyData()
+  const yearlyData  = buildYearlyData()
+
+  return (
+    <div className="max-w-3xl mx-auto space-y-6 pb-24">
+      {showConfetti && <Confetti />}
+
+      {/* ── Header ── */}
+      <div className="card space-y-3">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-xl font-bold">{lb.name}</h1>
+            {lb.description && <p className="text-sm text-[#555] mt-1">{lb.description}</p>}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#1a1a1a] border border-[#2a2a2a]">
+              <Hash className="w-3.5 h-3.5 text-[#555]" />
+              <span className="font-mono text-sm tracking-widest text-white">{lb.invite_code}</span>
+              <button onClick={copyCode} className="text-[#555] hover:text-white ml-1">
+                {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4 text-xs text-[#555]">
+          <span className="flex items-center gap-1"><Users className="w-3.5 h-3.5" /> {rows.length} members</span>
+          <span>Week of {formatWeekLabel(weekStart)}</span>
+          {myMem && (
+            <button
+              onClick={() => setShowWtModal(true)}
+              className="flex items-center gap-1 text-blue-400 hover:text-blue-300"
+            >
+              Update weight
+            </button>
+          )}
+        </div>
+
+        {isCreator && (
+          <div className="flex items-center gap-3 pt-1 border-t border-[#1a1a1a]">
+            <button
+              onClick={archiveWeek}
+              disabled={archiving}
+              className="flex items-center gap-1.5 text-xs btn-secondary py-1.5 px-3 disabled:opacity-50"
+            >
+              {archiving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
+              Archive This Week
+            </button>
+            <button onClick={load} className="text-[#555] hover:text-white">
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+            {archErr && <span className="text-xs text-red-400">{archErr}</span>}
+          </div>
+        )}
+      </div>
+
+      {/* ── Tabs ── */}
+      <div className="flex gap-1 bg-[#111] border border-[#222] rounded-2xl p-1">
+        {(['week', 'monthly', 'yearly', 'archives'] as Tab[]).map(t => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={`flex-1 py-2 rounded-xl text-xs font-medium capitalize transition-colors ${
+              tab === t ? 'bg-blue-500 text-white' : 'text-[#555] hover:text-white'
+            }`}
+          >
+            {t === 'week' ? 'This Week' : t === 'monthly' ? 'Monthly' : t === 'yearly' ? 'Yearly' : 'Past Weeks'}
+          </button>
+        ))}
+      </div>
+
+      {/* ── This Week ── */}
+      {tab === 'week' && (
+        <div className="space-y-2">
+          {rows.length === 0 && (
+            <div className="card text-center py-10 text-[#555] text-sm">
+              No members yet. Share the invite code!
+            </div>
+          )}
+          {rows.map((row, idx) => {
+            const isMe    = row.user_id === myId
+            const isFirst = idx === 0
+            const name    = row.profile?.full_name ?? 'Unknown'
+            const open    = expanded === row.user_id
+
+            return (
+              <div
+                key={row.user_id}
+                className={`rounded-2xl border transition-all ${
+                  isMe
+                    ? 'bg-blue-500/5 border-blue-500/20'
+                    : 'bg-[#111] border-[#1e1e1e]'
+                }`}
+              >
+                <button
+                  className="w-full flex items-center gap-4 px-4 py-4 text-left"
+                  onClick={() => setExpanded(open ? null : row.user_id)}
+                >
+                  {/* Rank */}
+                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 font-bold text-sm ${
+                    isFirst ? 'bg-amber-500/20 text-amber-400' :
+                    idx === 1 ? 'bg-[#333] text-[#999]' :
+                    'bg-[#1a1a1a] text-[#666]'
+                  }`}>
+                    {isFirst ? <Crown className="w-4 h-4" /> : idx + 1}
+                  </div>
+
+                  {/* Name + streak */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-sm">{name}</span>
+                      {isMe && <span className="text-[10px] text-blue-400">(you)</span>}
+                      {row.streak > 0 && (
+                        <span className="flex items-center gap-0.5 text-[11px] text-orange-400">
+                          <Flame className="w-3 h-3" />{row.streak}
+                        </span>
+                      )}
+                      {row.badges.slice(0, 2).map(b => (
+                        <span key={b.id} title={BADGE_DEFINITIONS[b.badge_type as keyof typeof BADGE_DEFINITIONS]?.label}>
+                          {BADGE_DEFINITIONS[b.badge_type as keyof typeof BADGE_DEFINITIONS]?.emoji}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="text-[11px] text-[#555] mt-0.5">
+                      {GOAL_LABELS[row.goal_type]?.label} · {ACTIVITY_LABELS[row.activity_level]?.label}
+                    </div>
+                  </div>
+
+                  {/* Score */}
+                  <div className="text-right shrink-0">
+                    <p className={`text-2xl font-bold ${scoreColorClass(row.score.total)}`}>
+                      {row.score.total}
+                    </p>
+                    <p className="text-[10px] text-[#555]">/ 100</p>
+                  </div>
+
+                  {open ? <ChevronUp className="w-4 h-4 text-[#444]" /> : <ChevronDown className="w-4 h-4 text-[#444]" />}
+                </button>
+
+                {open && (
+                  <div className="px-4 pb-4 pt-1 border-t border-[#1a1a1a]">
+                    <ScoreBreakdown score={row.score} />
+                    <div className="mt-3 grid grid-cols-4 gap-2 text-center text-xs">
+                      <div className="bg-[#0e0e0e] rounded-xl py-2">
+                        <p className="text-[#555] mb-0.5">Kcal in</p>
+                        <p className="font-bold">{row.logs.reduce((s, l) => s + l.kcal_in, 0)}</p>
+                      </div>
+                      <div className="bg-[#0e0e0e] rounded-xl py-2">
+                        <p className="text-[#555] mb-0.5">Burnt</p>
+                        <p className="font-bold">{row.logs.reduce((s, l) => s + l.kcal_burnt, 0)}</p>
+                      </div>
+                      <div className="bg-[#0e0e0e] rounded-xl py-2">
+                        <p className="text-[#555] mb-0.5">Active days</p>
+                        <p className="font-bold">{row.logs.filter(l => l.workout_done || l.kcal_in > 0).length}</p>
+                      </div>
+                      <div className="bg-[#0e0e0e] rounded-xl py-2">
+                        <p className="text-[#555] mb-0.5">Rest days</p>
+                        <p className="font-bold">{row.logs.filter(l => l.is_rest_day).length}</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* ── Monthly chart ── */}
+      {tab === 'monthly' && (
+        <div className="card">
+          <h2 className="text-sm font-semibold mb-5">Score over last 4 weeks</h2>
+          {monthlyData.length < 2 ? (
+            <p className="text-sm text-[#555] text-center py-8">Archive more weeks to see a trend.</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <LineChart data={monthlyData} margin={{ top: 5, right: 5, bottom: 5, left: -20 }}>
+                <CartesianGrid stroke="#1a1a1a" strokeDasharray="3 3" />
+                <XAxis
+                  dataKey="week"
+                  tickFormatter={v => new Date(v).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                  tick={{ fill: '#555', fontSize: 11 }}
+                />
+                <YAxis domain={[0, 100]} tick={{ fill: '#555', fontSize: 11 }} />
+                <Tooltip
+                  contentStyle={{ background: '#111', border: '1px solid #222', borderRadius: 12, fontSize: 12 }}
+                  labelFormatter={v => new Date(v).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                {rows.map((r, i) => (
+                  <Line
+                    key={r.user_id}
+                    type="monotone"
+                    dataKey={r.user_id}
+                    name={r.profile?.full_name ?? 'Unknown'}
+                    stroke={memberColor(i)}
+                    strokeWidth={2}
+                    dot={{ r: 3, fill: memberColor(i) }}
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      )}
+
+      {/* ── Yearly chart ── */}
+      {tab === 'yearly' && (
+        <div className="card">
+          <h2 className="text-sm font-semibold mb-5">Monthly average scores</h2>
+          {yearlyData.length === 0 ? (
+            <p className="text-sm text-[#555] text-center py-8">Archive weeks first to see yearly progress.</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <BarChart data={yearlyData} margin={{ top: 5, right: 5, bottom: 5, left: -20 }}>
+                <CartesianGrid stroke="#1a1a1a" strokeDasharray="3 3" />
+                <XAxis dataKey="month" tick={{ fill: '#555', fontSize: 11 }} />
+                <YAxis domain={[0, 100]} tick={{ fill: '#555', fontSize: 11 }} />
+                <Tooltip
+                  contentStyle={{ background: '#111', border: '1px solid #222', borderRadius: 12, fontSize: 12 }}
+                />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                {rows.map((r, i) => (
+                  <Bar
+                    key={r.user_id}
+                    dataKey={r.user_id}
+                    name={r.profile?.full_name ?? 'Unknown'}
+                    fill={memberColor(i)}
+                    radius={[4, 4, 0, 0]}
+                  />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      )}
+
+      {/* ── Past weeks ── */}
+      {tab === 'archives' && (
+        <div className="space-y-3">
+          {archives.length === 0 && (
+            <div className="card text-center py-10 text-[#555] text-sm">
+              No archived weeks yet.{isCreator ? ' Use "Archive This Week" at the end of each week.' : ''}
+            </div>
+          )}
+          {archives.map(arch => {
+            const sortedScores = Object.entries(arch.scores).sort((a, b) => b[1].total - a[1].total)
+            const winnerRow = rows.find(r => r.user_id === arch.winner_user_id)
+
+            return (
+              <div key={arch.id} className="card space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-semibold text-sm">
+                      Week of {formatWeekLabel(arch.week_start)}
+                      <span className="text-[#555] font-normal"> – {formatWeekLabel(arch.week_end)}</span>
+                    </p>
+                    {winnerRow && (
+                      <p className="text-xs text-amber-400 mt-0.5 flex items-center gap-1">
+                        <Crown className="w-3 h-3" />
+                        {winnerRow.profile?.full_name ?? 'Unknown'} won this week
+                      </p>
+                    )}
+                  </div>
+                  <Medal className="w-5 h-5 text-amber-400/60" />
+                </div>
+
+                <div className="space-y-2">
+                  {sortedScores.map(([uid, score], idx) => {
+                    const member = rows.find(r => r.user_id === uid)
+                    const name   = member?.profile?.full_name ?? 'Unknown'
+                    return (
+                      <div key={uid} className="space-y-0.5">
+                        <div className="flex items-center gap-3">
+                          <span className="text-[11px] text-[#555] w-5 shrink-0">#{idx + 1}</span>
+                          <span className="text-sm flex-1">{name}{uid === myId && ' (you)'}</span>
+                          <span className={`text-sm font-bold ${scoreColorClass(score.total)}`}>{score.total}</span>
+                        </div>
+                        <ReactionBar
+                          targetUserId={uid}
+                          reactions={reactions}
+                          myUserId={myId}
+                          onToggle={(emoji, has) => toggleReaction(arch.id, uid, emoji, has)}
+                        />
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* ── Badges panel ── */}
+      {tab === 'week' && allBadges.length > 0 && (
+        <div className="card">
+          <h2 className="text-sm font-semibold mb-4 flex items-center gap-2">
+            <Star className="w-4 h-4 text-amber-400" /> Earned Badges
+          </h2>
+          <div className="flex flex-wrap gap-2">
+            {allBadges.map(b => {
+              const def  = BADGE_DEFINITIONS[b.badge_type as keyof typeof BADGE_DEFINITIONS]
+              const name = rows.find(r => r.user_id === b.user_id)?.profile?.full_name ?? 'Unknown'
+              return (
+                <div key={b.id} title={`${name}: ${def?.description}`}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-[#161616] border border-[#2a2a2a] rounded-xl text-xs">
+                  <span className="text-base">{def?.emoji ?? '🏅'}</span>
+                  <div>
+                    <p className="font-medium text-white">{def?.label ?? b.badge_type}</p>
+                    <p className="text-[10px] text-[#555]">{name}</p>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {showWtModal && myMem && (
+        <UpdateWeightModal
+          memberId={myMem.id}
+          current={myMem.current_weight_kg}
+          onClose={() => setShowWtModal(false)}
+          onUpdated={updateMyWeight}
+        />
+      )}
+    </div>
+  )
+}

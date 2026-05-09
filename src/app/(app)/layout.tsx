@@ -1,4 +1,5 @@
 import Navbar from '@/components/Navbar'
+import DailyLogButton from '@/components/DailyLogButton'
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -7,6 +8,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       <main className="md:ml-64 pt-16 md:pt-0 p-4 md:p-8">
         {children}
       </main>
+      <DailyLogButton />
     </div>
   )
 }

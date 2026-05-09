@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
   Dumbbell, UtensilsCrossed, TrendingUp, Pill,
-  LayoutDashboard, User, LogOut, Menu, X, BookOpen, MessageSquare
+  LayoutDashboard, User, LogOut, Menu, X, BookOpen, MessageSquare, Trophy
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase'
 
@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { href: '/dashboard',    label: 'Dashboard',    icon: LayoutDashboard },
   { href: '/workouts',     label: 'Workouts',     icon: Dumbbell },
   { href: '/presets',      label: 'Exercises',    icon: BookOpen },
+  { href: '/leaderboard',  label: 'Leaderboard',  icon: Trophy },
   { href: '/diet',         label: 'Nutrition',    icon: UtensilsCrossed },
   { href: '/progress',     label: 'Progress',     icon: TrendingUp },
   { href: '/supplements',  label: 'Supplements',  icon: Pill },
@@ -48,7 +49,7 @@ export default function Navbar() {
         {/* Section: Main */}
         <p className="text-[10px] font-semibold uppercase tracking-widest text-[#333] px-3 mb-2">Main</p>
         <div className="flex flex-col gap-0.5 mb-6">
-          {NAV_ITEMS.slice(0, 3).map(({ href, label, icon: Icon }) => {
+          {NAV_ITEMS.slice(0, 4).map(({ href, label, icon: Icon }) => {
             const active = pathname === href || pathname?.startsWith(href + '/')
             return (
               <Link
@@ -70,7 +71,7 @@ export default function Navbar() {
         {/* Section: Track */}
         <p className="text-[10px] font-semibold uppercase tracking-widest text-[#333] px-3 mb-2">Track</p>
         <div className="flex flex-col gap-0.5 mb-6">
-          {NAV_ITEMS.slice(3, 6).map(({ href, label, icon: Icon }) => {
+          {NAV_ITEMS.slice(4, 7).map(({ href, label, icon: Icon }) => {
             const active = pathname === href || pathname?.startsWith(href + '/')
             return (
               <Link
@@ -92,7 +93,7 @@ export default function Navbar() {
         {/* Section: Account */}
         <p className="text-[10px] font-semibold uppercase tracking-widest text-[#333] px-3 mb-2">Account</p>
         <div className="flex flex-col gap-0.5">
-          {NAV_ITEMS.slice(6).map(({ href, label, icon: Icon }) => {
+          {NAV_ITEMS.slice(7).map(({ href, label, icon: Icon }) => {
             const active = pathname === href || pathname?.startsWith(href + '/')
             return (
               <Link

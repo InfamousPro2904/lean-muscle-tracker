@@ -11,11 +11,17 @@ import {
 import { createClient } from '@/lib/supabase'
 import type { Profile, MealLog, WorkoutLog, ProgressLog } from '@/lib/types'
 import { MUSCLE_GROUPS as PRESET_GROUPS } from '@/lib/exercise-presets'
+import {
+  LEAN_MUSCLE_ROUTINE_NAME,
+  LEAN_MUSCLE_WEEKLY_ROUTINES,
+  formatRoutineReps,
+  parseRoutineSetCount,
+} from '@/lib/lean-muscle-routine'
 
 // ── AI Workout Planner ─────────────────────────────────────────────
 
 type PlanGoal = 'lean_muscle' | 'fat_loss' | 'strength' | 'maintenance'
-type PlanDays = 3 | 4 | 5 | 6
+type PlanDays = 3 | 4 | 5 | 6 | 7
 type PlanTime = 30 | 45 | 60 | 90
 type PlanEquipment = 'bodyweight' | 'dumbbells' | 'full_gym'
 type PlanLevel = 'beginner' | 'intermediate' | 'advanced'
@@ -28,23 +34,62 @@ interface PlannerForm {
   level: PlanLevel
 }
 
+interface PlannedExercise {
+  name: string
+  muscleGroup: string
+  sets: string
+  reps: string
+  equipment: string
+  restSeconds: number
+  restLabel?: string
+  notes?: string
+}
+
 interface DayPlan {
   dayName: string
   focus: string
-  exercises: { name: string; sets: string; reps: string; equipment: string }[]
+  workoutName: string
+  typeLabel: string
+  splitType?: string
+  description?: string
+  exercises: PlannedExercise[]
   isRest?: boolean
+  isRecovery?: boolean
 }
 
 const SPLIT_CONFIGS: Record<string, (days: number) => string[]> = {
   3: () => ['Push', 'Pull', 'Legs'],
   4: () => ['Upper', 'Lower', 'Push', 'Pull'],
-  5: () => ['Chest/Tri', 'Back/Bi', 'Legs', 'Shoulders', 'Arms/Core'],
+  5: () => ['Upper', 'Lower', 'Upper', 'Lower', 'Recovery'],
   6: () => ['Push', 'Pull', 'Legs', 'Push', 'Pull', 'Legs'],
 }
 
 const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 
 function generateWorkoutPlan(form: PlannerForm): DayPlan[] {
+  if (form.days === 7 && form.goal === 'lean_muscle') {
+    return LEAN_MUSCLE_WEEKLY_ROUTINES.map((routine) => ({
+      dayName: routine.day_name,
+      focus: routine.name,
+      workoutName: routine.name,
+      typeLabel: routine.type_label,
+      splitType: routine.split_type,
+      description: `${LEAN_MUSCLE_ROUTINE_NAME}: ${routine.description}`,
+      isRest: routine.split_type === 'rest',
+      isRecovery: routine.split_type === 'recovery',
+      exercises: routine.exercises.map((exercise) => ({
+        name: exercise.exercise_name,
+        muscleGroup: exercise.muscle_group,
+        sets: exercise.sets,
+        reps: exercise.reps,
+        equipment: routine.type_label,
+        restSeconds: exercise.rest_seconds,
+        restLabel: exercise.rest_label,
+        notes: exercise.notes,
+      })),
+    }))
+  }
+
   const allDays = [...DAY_NAMES]
   const splitLabels = SPLIT_CONFIGS[form.days]?.(form.days) ?? ['Full Body', 'Rest', 'Full Body']
 
@@ -73,10 +118,7 @@ function generateWorkoutPlan(form: PlannerForm): DayPlan[] {
     Legs:      ['quadriceps', 'hamstrings', 'glutes', 'calves'],
     Upper:     ['chest', 'back', 'shoulders', 'biceps', 'triceps'],
     Lower:     ['quadriceps', 'hamstrings', 'glutes', 'calves'],
-    'Chest/Tri':    ['chest', 'triceps'],
-    'Back/Bi':      ['back', 'biceps'],
-    Shoulders:      ['shoulders'],
-    'Arms/Core':    ['biceps', 'triceps', 'core_abs'],
+    Recovery:  ['core_abs'],
     'Full Body':    ['chest', 'back', 'quadriceps', 'shoulders', 'biceps'],
   }
 
@@ -87,7 +129,15 @@ function generateWorkoutPlan(form: PlannerForm): DayPlan[] {
     const isRest = splitIdx === -1
 
     if (isRest) {
-      plans.push({ dayName: allDays[i], focus: 'Rest & Recovery', exercises: [], isRest: true })
+      plans.push({
+        dayName: allDays[i],
+        focus: 'Rest & Recovery',
+        workoutName: 'Rest',
+        typeLabel: 'Rest',
+        splitType: 'rest',
+        exercises: [],
+        isRest: true,
+      })
       continue
     }
 
@@ -95,7 +145,7 @@ function generateWorkoutPlan(form: PlannerForm): DayPlan[] {
     const muscleIds = focusToMuscles[focus] ?? ['chest']
 
     // Collect exercises from preset groups matching the muscle IDs
-    const candidates: { name: string; sets: string; reps: string; equipment: string }[] = []
+    const candidates: PlannedExercise[] = []
 
     for (const muscleId of muscleIds) {
       const group = PRESET_GROUPS.find(g => g.id === muscleId)
@@ -119,9 +169,11 @@ function generateWorkoutPlan(form: PlannerForm): DayPlan[] {
 
         candidates.push({
           name: variant.name,
+          muscleGroup: '',
           sets: setCount,
           reps,
           equipment: eqLabel,
+          restSeconds: parseRoutineSetCount(variant.rest_seconds),
         })
 
         if (candidates.length >= exercisesPerDay) break
@@ -132,6 +184,8 @@ function generateWorkoutPlan(form: PlannerForm): DayPlan[] {
     plans.push({
       dayName: allDays[i],
       focus,
+      workoutName: `${focus} - ${allDays[i]}`,
+      typeLabel: focus,
       exercises: candidates.slice(0, exercisesPerDay),
     })
   }
@@ -149,17 +203,17 @@ const DAY_NAME_TO_IDX: Record<string, number> = {
 const FOCUS_TO_SPLIT: Record<string, string> = {
   Push: 'ppl', Pull: 'ppl', Legs: 'ppl',
   Upper: 'upper_lower', Lower: 'upper_lower',
+  Recovery: 'recovery',
+  Rest: 'rest',
   'Full Body': 'full_body',
-  'Chest/Tri': 'bro_split', 'Back/Bi': 'bro_split',
-  Shoulders: 'bro_split', 'Arms/Core': 'bro_split',
 }
 
 const FOCUS_TO_MUSCLE: Record<string, string> = {
   Push: 'Chest', Pull: 'Back', Legs: 'Quads',
   Upper: 'Chest', Lower: 'Quads',
+  Recovery: 'Core',
+  Rest: 'Full Body',
   'Full Body': 'Full Body',
-  'Chest/Tri': 'Chest', 'Back/Bi': 'Back',
-  Shoulders: 'Shoulders', 'Arms/Core': 'Biceps',
 }
 
 // ── Stat ring component ────────────────────────────────────────────
@@ -203,7 +257,7 @@ export default function DashboardPage() {
   // Planner state
   const [showPlanner, setShowPlanner] = useState(false)
   const [plannerForm, setPlannerForm] = useState<PlannerForm>({
-    goal: 'lean_muscle', days: 4, time: 60, equipment: 'full_gym', level: 'intermediate',
+    goal: 'lean_muscle', days: 7, time: 60, equipment: 'full_gym', level: 'intermediate',
   })
   const [weekPlan, setWeekPlan] = useState<DayPlan[] | null>(null)
   const [planExpanded, setPlanExpanded] = useState<number | null>(null)
@@ -276,12 +330,12 @@ export default function DashboardPage() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) throw new Error('Not authenticated')
 
-      const trainingDays = weekPlan.filter(d => !d.isRest)
+      const routinesToSave = plannerForm.days === 7 ? weekPlan : weekPlan.filter(d => !d.isRest)
 
-      for (const day of trainingDays) {
+      for (const day of routinesToSave) {
         const dayIdx = DAY_NAME_TO_IDX[day.dayName] ?? 1
-        const splitType = FOCUS_TO_SPLIT[day.focus] ?? 'custom'
-        const muscleGroup = FOCUS_TO_MUSCLE[day.focus] ?? day.focus
+        const splitType = day.splitType ?? FOCUS_TO_SPLIT[day.typeLabel] ?? FOCUS_TO_SPLIT[day.focus] ?? 'custom'
+        const muscleGroup = FOCUS_TO_MUSCLE[day.typeLabel] ?? FOCUS_TO_MUSCLE[day.focus] ?? day.typeLabel
 
         const goalLabel = plannerForm.goal.replace(/_/g, ' ')
 
@@ -289,8 +343,8 @@ export default function DashboardPage() {
           .from('workout_routines')
           .insert({
             user_id: user.id,
-            name: `${day.focus} — ${day.dayName}`,
-            description: `Auto-generated ${goalLabel} plan · ${plannerForm.time} min · ${plannerForm.level}`,
+            name: day.workoutName,
+            description: day.description ?? `Auto-generated ${goalLabel} plan - ${plannerForm.time} min - ${plannerForm.level}`,
             split_type: splitType,
             day_of_week: [dayIdx],
             is_active: true,
@@ -304,12 +358,12 @@ export default function DashboardPage() {
           const rows = day.exercises.map((ex, idx) => ({
             routine_id: routine.id,
             exercise_name: ex.name,
-            muscle_group: muscleGroup,
-            sets: parseInt(ex.sets.split('–')[0]) || 3,
+            muscle_group: ex.muscleGroup || muscleGroup,
+            sets: parseRoutineSetCount(ex.sets),
             reps: ex.reps,
-            rest_seconds: 90,
-            notes: `Equipment: ${ex.equipment}`,
-            sort_order: idx,
+            rest_seconds: ex.restSeconds,
+            notes: ex.notes ?? `Equipment: ${ex.equipment}`,
+            sort_order: idx + 1,
           }))
 
           const { error: exError } = await supabase
@@ -456,7 +510,7 @@ export default function DashboardPage() {
                     </p>
                   </div>
                   <span className="text-xs text-[#555] shrink-0">
-                    {(w as any).exercise_logs?.length ?? 0} exercises
+                    {w.exercise_logs?.length ?? 0} exercises
                   </span>
                 </div>
               ))}
@@ -535,7 +589,7 @@ export default function DashboardPage() {
               <div>
                 <label className="block text-xs text-[#666] mb-1.5 font-medium uppercase tracking-wide">Days / Week</label>
                 <div className="flex gap-2">
-                  {([3, 4, 5, 6] as PlanDays[]).map(d => (
+                  {([3, 4, 5, 6, 7] as PlanDays[]).map(d => (
                     <button
                       key={d}
                       onClick={() => setPlannerForm(p => ({ ...p, days: d }))}
@@ -617,7 +671,9 @@ export default function DashboardPage() {
                 <div className="flex items-center gap-2 mb-4">
                   <Calendar className="w-4 h-4 text-blue-400" />
                   <h3 className="text-sm font-semibold">Your Weekly Plan</h3>
-                  <span className="badge badge-blue ml-1">{plannerForm.days} training days</span>
+                  <span className="badge badge-blue ml-1">
+                    {plannerForm.days === 7 ? '7 day split' : `${plannerForm.days} training days`}
+                  </span>
                 </div>
                 <div className="space-y-2">
                   {weekPlan.map((day, i) => (
@@ -643,12 +699,12 @@ export default function DashboardPage() {
                           <div className="flex items-center gap-2">
                             <p className="text-sm font-semibold">{day.dayName}</p>
                             <span className={`text-xs ${day.isRest ? 'text-[#444]' : 'text-[#666]'}`}>
-                              {day.isRest ? '— Rest' : `· ${day.focus}`}
+                              {day.isRest ? '- Rest' : `- ${day.focus}`}
                             </span>
                           </div>
                           {!day.isRest && (
                             <p className="text-xs text-[#555]">
-                              {day.exercises.length} exercises · {plannerForm.time} min
+                              {day.exercises.length} exercises - {day.isRecovery ? 'optional recovery' : `${plannerForm.time} min`}
                             </p>
                           )}
                         </div>
@@ -668,14 +724,16 @@ export default function DashboardPage() {
                               </span>
                               <div className="flex-1 min-w-0">
                                 <p className="text-sm font-medium truncate">{ex.name}</p>
-                                <p className="text-xs text-[#555]">{ex.equipment}</p>
+                                <p className="text-xs text-[#555]">{ex.muscleGroup || ex.equipment}</p>
                               </div>
                               <div className="text-right shrink-0">
-                                <p className="text-xs font-semibold text-white">{ex.sets} × {ex.reps}</p>
-                                <div className="flex items-center gap-1 justify-end">
-                                  <Clock className="w-2.5 h-2.5 text-[#444]" />
-                                  <p className="text-[10px] text-[#444]">90s rest</p>
-                                </div>
+                                <p className="text-xs font-semibold text-white">{ex.sets} x {formatRoutineReps(ex.reps)}</p>
+                                {(ex.restLabel || ex.restSeconds > 0) && (
+                                  <div className="flex items-center gap-1 justify-end">
+                                    <Clock className="w-2.5 h-2.5 text-[#444]" />
+                                    <p className="text-[10px] text-[#444]">{ex.restLabel || `${ex.restSeconds}s rest`}</p>
+                                  </div>
+                                )}
                               </div>
                             </div>
                           ))}
@@ -697,7 +755,7 @@ export default function DashboardPage() {
                     <div className="flex-1">
                       <p className="text-sm font-semibold">Save Full Week Plan to My Workouts</p>
                       <p className="text-xs text-[#555] mt-0.5">
-                        Creates {weekPlan.filter(d => !d.isRest).length} routines in your workout library so you can log sessions directly.
+                        Creates {plannerForm.days === 7 ? weekPlan.length : weekPlan.filter(d => !d.isRest).length} routines in your workout library so you can log sessions directly.
                       </p>
                     </div>
                     <button

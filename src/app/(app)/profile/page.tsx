@@ -3,7 +3,6 @@
 import { useEffect, useState } from 'react'
 import { User, Save, Calculator, Lock, Trash2, AlertTriangle, Activity } from 'lucide-react'
 import { createClient } from '@/lib/supabase'
-import type { Profile } from '@/lib/types'
 
 const GOALS = ['Lean Muscle', 'Fat Loss', 'Maintenance', 'Bulk'] as const
 const ACTIVITY_LEVELS = ['Sedentary', 'Light', 'Moderate', 'Active', 'Very Active'] as const

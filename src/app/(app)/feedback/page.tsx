@@ -187,7 +187,11 @@ export default function FeedbackPage() {
     // Optimistic UI
     setUpvotedIds(prev => {
       const next = new Set(prev)
-      wasUpvoted ? next.delete(id) : next.add(id)
+      if (wasUpvoted) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
       return next
     })
     setItems(prev => prev.map(item =>

@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { MUSCLE_GROUPS, KEY_EVIDENCE, type MuscleGroup, type ExerciseEntry, type EquipmentType } from '@/lib/exercise-presets'
+import { MUSCLE_GROUPS, KEY_EVIDENCE, type ExerciseEntry } from '@/lib/exercise-presets'
 import MuscleDiagram from '@/components/MuscleDiagram'
 import MotionCue from '@/components/MotionCue'
 import {
@@ -221,6 +221,9 @@ function ExerciseCard({
     if (entry.bodyweight) variants.push({ key: 'bodyweight', label: 'Bodyweight', variant: entry.bodyweight })
   }
 
+  const router = useRouter()
+  const [activeVariant, setActiveVariant] = useState('')
+
   if (variants.length === 0) {
     return (
       <div className="card-hover border-dashed">
@@ -229,10 +232,8 @@ function ExerciseCard({
     )
   }
 
-  const [activeVariant, setActiveVariant] = useState(variants[0].key)
-  const current = variants.find(v => v.key === activeVariant)?.variant ?? variants[0].variant
-
-  const router = useRouter()
+  const selectedVariant = activeVariant || variants[0].key
+  const current = variants.find(v => v.key === selectedVariant)?.variant ?? variants[0].variant
 
   const handleAddToWorkout = () => {
     // Mapping from preset muscle group IDs to workout muscle group strings
@@ -301,7 +302,7 @@ function ExerciseCard({
 
           {/* Motion cue + exercise name */}
           <div className="flex items-center gap-4 bg-[#0e0e0e] rounded-xl p-4">
-            <MotionCue motion={current.motion} name={current.name} />
+        <MotionCue motion={current.motion} />
             <div className="flex-1 min-w-0">
               <p className="font-semibold text-sm text-white leading-snug">{current.name}</p>
               {entry.emg_note && (

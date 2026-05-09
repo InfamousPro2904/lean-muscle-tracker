@@ -8,9 +8,17 @@ import {
   MUSCLE_GROUPS, SPLIT_TYPES, DAYS_OF_WEEK
 } from '@/lib/types'
 import {
+  LEAN_MUSCLE_ROUTINE_NAME,
+  LEAN_MUSCLE_WEEKLY_ROUTINES,
+  OLD_BRO_SPLIT_ROUTINE_NAMES,
+  formatRoutineReps,
+  isOldBroSplitRoutineName,
+  parseRoutineSetCount,
+} from '@/lib/lean-muscle-routine'
+import {
   Dumbbell, Plus, Trash2, ChevronDown, ChevronUp,
   Clock, Calendar, ClipboardList, History, Save, X, Loader2,
-  BookOpen, Check, Undo2, AlertTriangle
+  BookOpen, Check, Undo2, AlertTriangle, Coffee
 } from 'lucide-react'
 import PresetPicker, { type PresetSelection } from '@/components/workouts/PresetPicker'
 
@@ -20,6 +28,20 @@ interface ExerciseLogEntry {
   exercise_name: string
   muscle_group: string
   sets: { set_number: number; reps: number | null; weight_kg: number | null }[]
+}
+
+function formatRoutineExerciseDetails(exercise: RoutineExercise) {
+  const setLabel = `${exercise.sets} ${exercise.sets === 1 ? 'set' : 'sets'}`
+  const parts = [
+    exercise.muscle_group,
+    `${setLabel} x ${formatRoutineReps(exercise.reps)}`,
+  ]
+
+  if (exercise.rest_seconds > 0) {
+    parts.push(`${exercise.rest_seconds}s rest`)
+  }
+
+  return parts.join(' - ')
 }
 
 // ── Undo state ────────────────────────────────────────────────────
@@ -79,6 +101,7 @@ export default function WorkoutsPage() {
   const [logDuration, setLogDuration] = useState<number | ''>('')
   const [logNotes, setLogNotes] = useState('')
   const [exerciseEntries, setExerciseEntries] = useState<ExerciseLogEntry[]>([])
+  const [isRestDay, setIsRestDay] = useState(false)
   const [savingLog, setSavingLog] = useState(false)
 
   // ─── History State ───
@@ -114,25 +137,98 @@ export default function WorkoutsPage() {
   // ─── Fetch Routines ───
   const fetchRoutines = useCallback(async () => {
     if (!userId) return
-    const { data: routinesData } = await supabase
-      .from('workout_routines')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
 
-    if (routinesData) {
-      const routinesWithExercises = await Promise.all(
-        routinesData.map(async (r) => {
-          const { data: exercises } = await supabase
-            .from('routine_exercises')
-            .select('*')
-            .eq('routine_id', r.id)
-            .order('sort_order', { ascending: true })
-          return { ...r, exercises: exercises || [] }
-        })
-      )
-      setRoutines(routinesWithExercises)
+    const loadRoutineRows = async () => {
+      const { data } = await supabase
+        .from('workout_routines')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+
+      return data || []
     }
+
+    const seedLeanMuscleRoutine = async (oldRoutineIds: string[]) => {
+      if (oldRoutineIds.length > 0) {
+        await supabase.from('routine_exercises').delete().in('routine_id', oldRoutineIds)
+        await supabase.from('workout_routines').delete().in('id', oldRoutineIds)
+      }
+
+      for (const template of LEAN_MUSCLE_WEEKLY_ROUTINES) {
+        const { data: routine, error: routineError } = await supabase
+          .from('workout_routines')
+          .insert({
+            user_id: userId,
+            name: template.name,
+            description: `${LEAN_MUSCLE_ROUTINE_NAME}: ${template.description}`,
+            split_type: template.split_type,
+            day_of_week: template.day_of_week,
+            is_active: true,
+          })
+          .select()
+          .single()
+
+        if (routineError || !routine) throw routineError ?? new Error('Failed to create default routine')
+
+        if (template.exercises.length > 0) {
+          const rows = template.exercises.map((exercise, idx) => ({
+            routine_id: routine.id,
+            exercise_name: exercise.exercise_name,
+            muscle_group: exercise.muscle_group,
+            sets: parseRoutineSetCount(exercise.sets),
+            reps: exercise.reps,
+            rest_seconds: exercise.rest_seconds,
+            notes: [
+              `Plan: ${LEAN_MUSCLE_ROUTINE_NAME}`,
+              exercise.rest_label ? `Rest target: ${exercise.rest_label}` : null,
+              exercise.notes,
+            ].filter(Boolean).join(' | '),
+            sort_order: idx + 1,
+          }))
+
+          const { error: exercisesError } = await supabase
+            .from('routine_exercises')
+            .insert(rows)
+
+          if (exercisesError) throw exercisesError
+        }
+      }
+    }
+
+    let routinesData = await loadRoutineRows()
+
+    if (typeof window !== 'undefined') {
+      const syncKey = `lean-muscle-routine-sync-v1:${userId}`
+      const hasSynced = window.localStorage.getItem(syncKey) === 'done'
+      const oldNameHits = OLD_BRO_SPLIT_ROUTINE_NAMES.filter((oldName) =>
+        routinesData.some((routine) => isOldBroSplitRoutineName(routine.name) && routine.name.startsWith(oldName))
+      ).length
+      const shouldReplaceOldDefaults = oldNameHits >= 3
+      const oldRoutineIds = shouldReplaceOldDefaults
+        ? routinesData.filter((routine) => isOldBroSplitRoutineName(routine.name)).map((routine) => routine.id)
+        : []
+      const shouldSeedDefault = routinesData.length === 0 && !hasSynced
+
+      if (shouldReplaceOldDefaults || shouldSeedDefault) {
+        await seedLeanMuscleRoutine(oldRoutineIds)
+        window.localStorage.setItem(syncKey, 'done')
+        routinesData = await loadRoutineRows()
+      } else if (!hasSynced && routinesData.length > 0) {
+        window.localStorage.setItem(syncKey, 'done')
+      }
+    }
+
+    const routinesWithExercises = await Promise.all(
+      routinesData.map(async (r) => {
+        const { data: exercises } = await supabase
+          .from('routine_exercises')
+          .select('*')
+          .eq('routine_id', r.id)
+          .order('sort_order', { ascending: true })
+        return { ...r, exercises: exercises || [] }
+      })
+    )
+    setRoutines(routinesWithExercises)
   }, [userId, supabase])
 
   // ─── Fetch History ───
@@ -353,12 +449,64 @@ export default function WorkoutsPage() {
   }
 
   const saveWorkoutLog = async () => {
-    if (!userId || exerciseEntries.length === 0) return
+    if (!userId) return
+    if (!isRestDay && exerciseEntries.length === 0) return
+
+    setSavingLog(true)
+
+    if (isRestDay) {
+      // Log a rest day — insert a minimal workout_log entry + upsert daily_log
+      const { data: logData, error: logError } = await supabase
+        .from('workout_logs')
+        .insert({
+          user_id: userId,
+          routine_id: null,
+          workout_name: 'Rest Day',
+          date: logDate,
+          duration_minutes: null,
+          notes: logNotes || null,
+        })
+        .select()
+        .single()
+
+      if (!logError && logData) {
+        // Best-effort: upsert daily_log so progress tracking knows about the rest day
+        const { data: existing } = await supabase
+          .from('daily_logs')
+          .select('id')
+          .eq('user_id', userId)
+          .eq('date', logDate)
+          .maybeSingle()
+
+        if (existing) {
+          await supabase
+            .from('daily_logs')
+            .update({ is_rest_day: true, workout_done: false })
+            .eq('id', existing.id)
+        } else {
+          await supabase.from('daily_logs').insert({
+            user_id: userId,
+            date: logDate,
+            kcal_in: 0,
+            kcal_burnt: 0,
+            workout_done: false,
+            is_rest_day: true,
+            notes: null,
+          })
+        }
+      }
+
+      setSelectedRoutineId(''); setCustomWorkoutName('')
+      setLogDate(new Date().toISOString().split('T')[0]); setLogDuration('')
+      setLogNotes(''); setExerciseEntries([]); setIsRestDay(false)
+      setSavingLog(false); fetchHistory(); setActiveTab('history')
+      return
+    }
+
     const workoutName = selectedRoutineId
       ? routines.find(r => r.id === selectedRoutineId)?.name || 'Workout'
       : customWorkoutName || 'Custom Workout'
 
-    setSavingLog(true)
     const { data: logData, error: logError } = await supabase
       .from('workout_logs')
       .insert({
@@ -392,7 +540,7 @@ export default function WorkoutsPage() {
     await supabase.from('exercise_logs').insert(exerciseLogsToInsert)
     setSelectedRoutineId(''); setCustomWorkoutName('')
     setLogDate(new Date().toISOString().split('T')[0]); setLogDuration('')
-    setLogNotes(''); setExerciseEntries([])
+    setLogNotes(''); setExerciseEntries([]); setIsRestDay(false)
     setSavingLog(false); fetchHistory(); setActiveTab('history')
   }
 
@@ -630,7 +778,7 @@ export default function WorkoutsPage() {
                           <div>
                             <p className="font-medium text-sm">{ex.exercise_name}</p>
                             <p className="text-xs text-[#555] mt-0.5">
-                              {ex.muscle_group} · {ex.sets} sets × {ex.reps} reps · {ex.rest_seconds}s rest
+                              {formatRoutineExerciseDetails(ex)}
                             </p>
                           </div>
                         </div>
@@ -907,18 +1055,36 @@ export default function WorkoutsPage() {
             </div>
           ))}
 
-          <div className="flex gap-3">
-            <button onClick={addCustomExerciseEntry} className="btn-secondary flex items-center gap-2">
-              <Plus className="w-4 h-4" />
-              Add Exercise
+          <div className="flex gap-3 flex-wrap">
+            <button
+              onClick={() => {
+                setIsRestDay(prev => {
+                  if (!prev) setExerciseEntries([])
+                  return !prev
+                })
+              }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all border ${
+                isRestDay
+                  ? 'bg-amber-500/15 border-amber-500/30 text-amber-400'
+                  : 'bg-[#161616] border-[#2a2a2a] text-[#555] hover:text-white'
+              }`}
+            >
+              <Coffee className="w-4 h-4 shrink-0" />
+              Rest Day
             </button>
+            {!isRestDay && (
+              <button onClick={addCustomExerciseEntry} className="btn-secondary flex items-center gap-2">
+                <Plus className="w-4 h-4" />
+                Add Exercise
+              </button>
+            )}
             <button
               onClick={saveWorkoutLog}
-              disabled={savingLog || exerciseEntries.length === 0}
+              disabled={savingLog || (!isRestDay && exerciseEntries.length === 0)}
               className="btn-primary flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {savingLog ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-              Save Workout
+              {isRestDay ? 'Log Rest Day' : 'Save Workout'}
             </button>
           </div>
         </div>
