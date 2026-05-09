@@ -149,7 +149,7 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
       if (!lbData) throw new Error('Failed to generate unique invite code')
 
       const startW = parseFloat(qform.start_weight_kg) || null
-      await supabase.from('leaderboard_members').insert({
+      const { error: memberError } = await supabase.from('leaderboard_members').insert({
         leaderboard_id:    lbData.id,
         user_id:           user.id,
         goal_type:         qform.goal_type,
@@ -158,6 +158,7 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
         current_weight_kg: startW,
         target_weight_kg:  parseFloat(qform.target_weight_kg) || null,
       })
+      if (memberError) throw new Error(`Could not add you as a member: ${memberError.message}`)
 
       onCreated(lbData.id)
     } catch (err) {
@@ -248,7 +249,7 @@ function JoinModal({ onClose, onJoined }: { onClose: () => void; onJoined: (id: 
 
     if (!data) { setError('No leaderboard found with that code'); return }
 
-    // Check already a member
+    // Check already a member — redirect directly rather than blocking
     const { data: { user } } = await supabase.auth.getUser()
     if (user) {
       const { data: mem } = await supabase
@@ -257,7 +258,7 @@ function JoinModal({ onClose, onJoined }: { onClose: () => void; onJoined: (id: 
         .eq('leaderboard_id', data.id)
         .eq('user_id', user.id)
         .maybeSingle()
-      if (mem) { setError("You're already a member of this leaderboard"); return }
+      if (mem) { onJoined(data.id); return }
     }
 
     setFound(data as Leaderboard)
@@ -383,12 +384,20 @@ export default function LeaderboardListPage() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) { setLoading(false); return }
 
+    // Fetch memberships and leaderboards with separate queries
+    // (avoids dependency on PostgREST schema-cache for embedded joins)
     const { data: mems } = await supabase
       .from('leaderboard_members')
-      .select('*, leaderboards(*)')
+      .select('*')
       .eq('user_id', user.id)
 
-    if (!mems) { setLoading(false); return }
+    if (!mems?.length) { setRows([]); setLoading(false); return }
+
+    const lbIds = mems.map(m => m.leaderboard_id)
+    const { data: lbs } = await supabase
+      .from('leaderboards')
+      .select('*')
+      .in('id', lbIds)
 
     const today     = new Date().toISOString().split('T')[0]
     const ninetyAgo = new Date(Date.now() - 90 * 864e5).toISOString().split('T')[0]
@@ -404,7 +413,7 @@ export default function LeaderboardListPage() {
 
     const results: MyLeaderboard[] = []
     for (const mem of mems) {
-      const lb = mem.leaderboards as Leaderboard
+      const lb = (lbs ?? []).find(l => l.id === mem.leaderboard_id) as Leaderboard | undefined
       if (!lb) continue
 
       const { count } = await supabase
