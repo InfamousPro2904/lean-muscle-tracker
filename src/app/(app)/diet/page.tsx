@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { createClient } from '@/lib/supabase'
 import { MealLog, Profile, MEAL_TYPES, MealTemplate, BasketItem, Macros100g } from '@/lib/types'
 import { QUICK_FOODS, searchFoods, type FoodItem } from '@/lib/foods'
+import FoodItemEditor, { type EditableFood } from '@/components/diet/FoodItemEditor'
+import TemplateEditorModal from '@/components/diet/TemplateEditorModal'
 import {
   UtensilsCrossed,
   Plus,
@@ -51,6 +53,13 @@ function displayDate(d: Date): string {
 function pct(value: number, target: number): number {
   if (target <= 0) return 0
   return Math.min(Math.round((value / target) * 100), 999)
+}
+
+/** Format a number to at most 1 decimal place; trailing .0 stripped */
+function fmt(n: number): string {
+  if (!isFinite(n)) return '0'
+  const r = Math.round(n * 10) / 10
+  return Number.isInteger(r) ? r.toString() : r.toFixed(1)
 }
 
 function barColor(percent: number): string {
@@ -164,6 +173,10 @@ export default function DietPage() {
   // Recent foods (last 30 days, distinct food names sorted by frequency)
   const [recentFoods, setRecentFoods]   = useState<FoodResult[]>([])
   const [showRecent,  setShowRecent]    = useState(false)
+
+  // Inline edit of a basket item / template
+  const [editingBasketId,  setEditingBasketId]  = useState<string | null>(null)
+  const [editingTemplate,  setEditingTemplate]  = useState<MealTemplate | null>(null)
 
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -335,6 +348,13 @@ export default function DietPage() {
 
   const updateBasketGrams = (id: string, grams: number) =>
     setBasket(prev => prev.map(b => b.id === id ? { ...b, grams } : b))
+
+  /** Replace a basket item's full data (name + per100g + grams) from inline editor */
+  const updateBasketItem = (id: string, food: EditableFood) =>
+    setBasket(prev => prev.map(b => b.id === id
+      ? { ...b, name: food.name, per100g: food.per100g, grams: food.grams }
+      : b
+    ))
 
   // ── Templates ───────────────────────────────────────────────────────────
 
@@ -754,7 +774,7 @@ export default function DietPage() {
           {/* Protein */}
           <div className="bg-[#1a1a1a] rounded-xl p-4 text-center space-y-2">
             <span className="text-xs text-gray-400 uppercase tracking-wide">Protein</span>
-            <p className={`text-3xl font-bold ${textColor(protPct)}`}>{totals.protein}g</p>
+            <p className={`text-3xl font-bold ${textColor(protPct)}`}>{fmt(totals.protein)}g</p>
             <p className="text-xs text-gray-500">/ {profile?.protein_target ?? '—'}g</p>
             <div className="progress-bar">
               <div
@@ -770,7 +790,7 @@ export default function DietPage() {
           {/* Carbs */}
           <div className="bg-[#1a1a1a] rounded-xl p-4 text-center space-y-2">
             <span className="text-xs text-gray-400 uppercase tracking-wide">Carbs</span>
-            <p className={`text-3xl font-bold ${textColor(carbPct)}`}>{totals.carbs}g</p>
+            <p className={`text-3xl font-bold ${textColor(carbPct)}`}>{fmt(totals.carbs)}g</p>
             <p className="text-xs text-gray-500">/ {profile?.carb_target ?? '—'}g</p>
             <div className="progress-bar">
               <div
@@ -786,7 +806,7 @@ export default function DietPage() {
           {/* Fat */}
           <div className="bg-[#1a1a1a] rounded-xl p-4 text-center space-y-2">
             <span className="text-xs text-gray-400 uppercase tracking-wide">Fat</span>
-            <p className={`text-3xl font-bold ${textColor(fatPct)}`}>{totals.fat}g</p>
+            <p className={`text-3xl font-bold ${textColor(fatPct)}`}>{fmt(totals.fat)}g</p>
             <p className="text-xs text-gray-500">/ {profile?.fat_target ?? '—'}g</p>
             <div className="progress-bar">
               <div
@@ -937,7 +957,7 @@ export default function DietPage() {
                             {tpl.is_favorite && <Star className="w-3 h-3 text-amber-400 fill-amber-400 shrink-0" />}
                           </div>
                           <p className="text-[10px] text-[#555] mt-0.5">
-                            {tpl.items.length} item{tpl.items.length !== 1 ? 's' : ''} · {Math.round(totals.kcal)} kcal · P {Math.round(totals.protein)}g
+                            {tpl.items.length} item{tpl.items.length !== 1 ? 's' : ''} · {Math.round(totals.kcal)} kcal · P {fmt(totals.protein)}g
                             {tpl.default_meal_type && ` · ${tpl.default_meal_type}`}
                           </p>
                         </div>
@@ -948,6 +968,13 @@ export default function DietPage() {
                             title="Toggle favorite"
                           >
                             <Star className={`w-3.5 h-3.5 ${tpl.is_favorite ? 'fill-amber-400 text-amber-400' : ''}`} />
+                          </button>
+                          <button
+                            onClick={() => setEditingTemplate(tpl)}
+                            className="text-[#444] hover:text-blue-400 p-1"
+                            title="Edit template"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
                           </button>
                           <button
                             onClick={() => deleteTemplate(tpl)}
@@ -1055,7 +1082,7 @@ export default function DietPage() {
                           <div className="flex-1 min-w-0">
                             <p className="text-xs font-medium truncate">{item.name}</p>
                             <p className="text-[10px] text-[#555]">
-                              {Math.round(item.per100g.kcal * s)} kcal · P {Math.round(item.per100g.protein * s * 10) / 10}g
+                              {Math.round(item.per100g.kcal * s)} kcal · P {fmt(item.per100g.protein * s)}g · C {fmt(item.per100g.carbs * s)}g · F {fmt(item.per100g.fat * s)}g
                             </p>
                           </div>
                           {editing ? (
@@ -1079,8 +1106,16 @@ export default function DietPage() {
                             </button>
                           )}
                           <button
+                            onClick={() => setEditingBasketId(item.id)}
+                            className="text-[#555] hover:text-blue-400 p-0.5"
+                            title="Edit name & macros"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
                             onClick={() => removeFromBasket(item.id)}
                             className="text-[#555] hover:text-red-400 p-0.5"
+                            title="Remove"
                           >
                             <X className="w-3.5 h-3.5" />
                           </button>
@@ -1092,10 +1127,10 @@ export default function DietPage() {
                   {/* Totals */}
                   <div className="flex gap-3 text-xs text-center pt-2 border-t border-green-500/15">
                     {[
-                      { label: 'kcal',    val: Math.round(totals.kcal),                color: 'text-orange-400' },
-                      { label: 'Protein', val: Math.round(totals.protein * 10) / 10,   color: 'text-blue-400' },
-                      { label: 'Carbs',   val: Math.round(totals.carbs   * 10) / 10,   color: 'text-yellow-400' },
-                      { label: 'Fat',     val: Math.round(totals.fat     * 10) / 10,   color: 'text-red-400' },
+                      { label: 'kcal',    val: Math.round(totals.kcal).toString(),       color: 'text-orange-400' },
+                      { label: 'Protein', val: fmt(totals.protein),                       color: 'text-blue-400' },
+                      { label: 'Carbs',   val: fmt(totals.carbs),                         color: 'text-yellow-400' },
+                      { label: 'Fat',     val: fmt(totals.fat),                           color: 'text-red-400' },
                     ].map(({ label, val, color }) => (
                       <div key={label} className="flex-1">
                         <p className={`font-bold text-base ${color}`}>{val}{label !== 'kcal' ? 'g' : ''}</p>
@@ -1204,7 +1239,7 @@ export default function DietPage() {
                         className="flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-xl bg-[#161616] border border-[#222] hover:border-amber-500/30 hover:bg-amber-500/5 text-left transition-colors"
                       >
                         <p className="text-xs font-medium leading-tight truncate w-full">{food.name}</p>
-                        <p className="text-[10px] text-orange-400">{food.per100g.kcal} kcal · P {food.per100g.protein}g</p>
+                        <p className="text-[10px] text-orange-400">{food.per100g.kcal} kcal · P {fmt(food.per100g.protein)}g</p>
                       </button>
                     ))}
                   </div>
@@ -1217,7 +1252,7 @@ export default function DietPage() {
                         className="flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-xl bg-[#161616] border border-[#222] hover:border-[#333] hover:bg-[#1a1a1a] text-left transition-colors"
                       >
                         <p className="text-xs font-medium leading-tight truncate w-full">{food.name}</p>
-                        <p className="text-[10px] text-orange-400">{food.per100g.kcal} kcal · P {food.per100g.protein}g</p>
+                        <p className="text-[10px] text-orange-400">{food.per100g.kcal} kcal · P {fmt(food.per100g.protein)}g</p>
                       </button>
                     ))}
                   </div>
@@ -1302,9 +1337,9 @@ export default function DietPage() {
                     </div>
                     <div className="flex items-center gap-4 text-xs text-gray-400 shrink-0">
                       <span className="text-orange-400 font-semibold">{meal.calories} cal</span>
-                      <span>P {meal.protein_g}g</span>
-                      <span>C {meal.carbs_g}g</span>
-                      <span>F {meal.fat_g}g</span>
+                      <span>P {fmt(meal.protein_g)}g</span>
+                      <span>C {fmt(meal.carbs_g)}g</span>
+                      <span>F {fmt(meal.fat_g)}g</span>
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
                       <button onClick={() => startEdit(meal)} className="p-1.5 rounded-lg hover:bg-[#262626] text-gray-400 hover:text-white transition-colors" title="Edit">
@@ -1337,7 +1372,7 @@ export default function DietPage() {
                           </div>
                           <div className="flex items-center gap-3 text-[11px]">
                             <span className="text-orange-400 font-semibold">{Math.round(t.kcal)} cal</span>
-                            <span className="text-[#666]">P {Math.round(t.protein * 10) / 10}g · C {Math.round(t.carbs * 10) / 10}g · F {Math.round(t.fat * 10) / 10}g</span>
+                            <span className="text-[#666]">P {fmt(t.protein)}g · C {fmt(t.carbs)}g · F {fmt(t.fat)}g</span>
                             <button
                               onClick={() => handleDeleteSession(g.sessionId)}
                               className="p-1 rounded hover:bg-red-500/20 text-[#666] hover:text-red-400 transition-colors"
@@ -1401,6 +1436,28 @@ export default function DietPage() {
           </ResponsiveContainer>
         </div>
       </section>
+
+      {/* ── Editor modals ── */}
+      {editingBasketId && (() => {
+        const item = basket.find(b => b.id === editingBasketId)
+        if (!item) return null
+        return (
+          <FoodItemEditor
+            initial={{ name: item.name, brand: item.brand, per100g: item.per100g, grams: item.grams }}
+            showGrams
+            onClose={() => setEditingBasketId(null)}
+            onSave={(food) => { updateBasketItem(item.id, food); setEditingBasketId(null) }}
+          />
+        )
+      })()}
+
+      {editingTemplate && (
+        <TemplateEditorModal
+          template={editingTemplate}
+          onClose={() => setEditingTemplate(null)}
+          onSaved={loadTemplates}
+        />
+      )}
     </div>
   )
 }

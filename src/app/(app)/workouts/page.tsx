@@ -538,6 +538,47 @@ export default function WorkoutsPage() {
     })
 
     await supabase.from('exercise_logs').insert(exerciseLogsToInsert)
+
+    // ─── Auto-sync to daily_logs (for leaderboard scoring) ─────────────────
+    // Estimate kcal_burnt: prefer duration-based (5 kcal/min for moderate
+    // weight training). Fall back to set count (4 kcal/set) if no duration.
+    const totalSets = exerciseEntries.reduce((s, e) => s + e.sets.length, 0)
+    const estimatedKcal = logDuration && Number(logDuration) > 0
+      ? Math.round(Number(logDuration) * 5)
+      : Math.round(totalSets * 4)
+
+    if (estimatedKcal > 0) {
+      const { data: existingDaily } = await supabase
+        .from('daily_logs')
+        .select('id, kcal_burnt, workout_done, kcal_in, is_rest_day, notes')
+        .eq('user_id', userId)
+        .eq('date', logDate)
+        .maybeSingle()
+
+      if (existingDaily) {
+        // Add to existing kcal_burnt (multiple workouts in one day) and flip
+        // workout_done. Don't overwrite kcal_in / is_rest_day / notes.
+        await supabase
+          .from('daily_logs')
+          .update({
+            kcal_burnt:   (existingDaily.kcal_burnt ?? 0) + estimatedKcal,
+            workout_done: true,
+            is_rest_day:  false,  // logging a workout cancels rest day
+          })
+          .eq('id', existingDaily.id)
+      } else {
+        await supabase.from('daily_logs').insert({
+          user_id:      userId,
+          date:         logDate,
+          kcal_in:      0,
+          kcal_burnt:   estimatedKcal,
+          workout_done: true,
+          is_rest_day:  false,
+          notes:        null,
+        })
+      }
+    }
+
     setSelectedRoutineId(''); setCustomWorkoutName('')
     setLogDate(new Date().toISOString().split('T')[0]); setLogDuration('')
     setLogNotes(''); setExerciseEntries([]); setIsRestDay(false)

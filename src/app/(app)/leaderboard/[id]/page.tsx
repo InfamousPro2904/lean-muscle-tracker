@@ -23,6 +23,7 @@ import MemberSettingsModal from '@/components/leaderboard/MemberSettingsModal'
 import LeaderboardManageModal from '@/components/leaderboard/LeaderboardManageModal'
 import NotificationsPanel from '@/components/leaderboard/NotificationsPanel'
 import ScoreExplainerModal from '@/components/leaderboard/ScoreExplainerModal'
+import MyDailyLogsPanel from '@/components/leaderboard/MyDailyLogsPanel'
 
 // ── Sub-types ──────────────────────────────────────────────────────
 
@@ -188,6 +189,8 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
   const [showConfetti,      setShowConfetti]      = useState(false)
   const [autoArchiveBanner, setAutoArchiveBanner] = useState<string | null>(null)
   const [explainRow,        setExplainRow]        = useState<MemberRow | null>(null)
+  type RankAxis = 'total' | 'workout' | 'nutrition'
+  const [rankAxis,          setRankAxis]          = useState<RankAxis>('total')
 
   const weekStart = getWeekStart()
   const weekEnd   = getWeekEnd(weekStart)
@@ -577,14 +580,43 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
       </div>
 
       {/* ── This Week ── */}
-      {tab === 'week' && (
+      {tab === 'week' && (() => {
+        // Pick which score axis drives ranking + display
+        const axisValue = (r: MemberRow): number => {
+          if (rankAxis === 'workout')   return r.score.burnt
+          if (rankAxis === 'nutrition') return r.score.adherence
+          return r.score.total
+        }
+        const sortedRows = [...rows].sort((a, b) => axisValue(b) - axisValue(a))
+        const axisMeta: Record<RankAxis, { label: string; color: string; bg: string }> = {
+          total:     { label: 'Combined',  color: 'text-blue-400',  bg: 'bg-blue-500/15' },
+          workout:   { label: 'Workout',   color: 'text-emerald-400', bg: 'bg-emerald-500/15' },
+          nutrition: { label: 'Nutrition', color: 'text-amber-400',  bg: 'bg-amber-500/15' },
+        }
+        return (
         <div className="space-y-2">
+          {/* Ranking axis pills */}
+          <div className="flex gap-1 bg-[#0e0e0e] border border-[#222] rounded-xl p-1 mb-3">
+            {(['total', 'workout', 'nutrition'] as RankAxis[]).map(a => (
+              <button
+                key={a}
+                onClick={() => setRankAxis(a)}
+                className={`flex-1 py-2 rounded-lg text-xs font-medium transition-colors ${
+                  rankAxis === a
+                    ? `${axisMeta[a].bg} ${axisMeta[a].color}`
+                    : 'text-[#555] hover:text-white'
+                }`}
+              >
+                {axisMeta[a].label}
+              </button>
+            ))}
+          </div>
           {rows.length === 0 && (
             <div className="card text-center py-10 text-[#555] text-sm">
               No members yet. Share the invite code!
             </div>
           )}
-          {rows.map((row, idx) => {
+          {sortedRows.map((row, idx) => {
             const isMe    = row.user_id === myId
             const isFirst = idx === 0
             const name    = row.profile?.full_name ?? 'Unknown'
@@ -637,15 +669,15 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
                   <div className="text-right shrink-0">
                     <div className="flex items-center justify-end gap-1">
                       <TrendPill trend={scoreTrend(row.user_id, row.score.total, archives)} />
-                      <p className={`text-2xl font-bold ${scoreColorClass(row.score.total)}`}>
-                        {row.score.total}
+                      <p className={`text-2xl font-bold ${scoreColorClass(axisValue(row))}`}>
+                        {axisValue(row)}
                       </p>
                     </div>
                     <button
                       onClick={(e) => { e.stopPropagation(); setExplainRow(row) }}
                       className="text-[10px] text-[#555] hover:text-blue-400 transition-colors"
                     >
-                      / 100 ⓘ
+                      {rankAxis === 'total' ? '/ 100 ⓘ' : `${axisMeta[rankAxis].label} ⓘ`}
                     </button>
                   </div>
 
@@ -695,6 +727,16 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
                           <p className="font-bold">{row.logs.filter(l => l.is_rest_day).length}</p>
                         </div>
                       </div>
+
+                      {/* Editable own daily-logs panel — only for the current user */}
+                      {isMe && (
+                        <MyDailyLogsPanel
+                          weekStart={weekStart}
+                          weekEnd={weekEnd}
+                          logs={row.logs}
+                          onChanged={load}
+                        />
+                      )}
                     </div>
                   )
                 })()}
@@ -702,7 +744,8 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
             )
           })}
         </div>
-      )}
+        )
+      })()}
 
       {/* ── Monthly chart ── */}
       {tab === 'monthly' && (

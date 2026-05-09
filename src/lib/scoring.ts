@@ -58,13 +58,15 @@ export function calculateWeeklyScore(
   const tdee     = estimateTDEE(weight, height, age, member.activity_level)
   const target   = goalTargetKcal(tdee, member.goal_type)
 
-  // 1. Goal adherence (40%) — how close avg kcal_in is to target
+  // 1. Goal adherence (40%) — how close avg kcal_in is to target.
+  // If no food was logged at all this week, give a neutral 0.5 instead of
+  // zero — purely workout-driven days shouldn't crater the score.
   const foodLogs   = logs.filter(l => l.kcal_in > 0)
   const avgKcalIn  = foodLogs.length > 0
     ? foodLogs.reduce((s, l) => s + l.kcal_in, 0) / foodLogs.length
     : 0
   const adherence  = foodLogs.length === 0
-    ? 0
+    ? 0.5
     : clamp(1 - Math.abs(avgKcalIn - target) / target)
 
   // 2. Kcal burnt (30%) — weekly exercise output vs 2 500 kcal target
