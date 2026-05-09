@@ -21,6 +21,8 @@ import {
 } from '@/lib/scoring'
 import MemberSettingsModal from '@/components/leaderboard/MemberSettingsModal'
 import LeaderboardManageModal from '@/components/leaderboard/LeaderboardManageModal'
+import NotificationsPanel from '@/components/leaderboard/NotificationsPanel'
+import ScoreExplainerModal from '@/components/leaderboard/ScoreExplainerModal'
 
 // ── Sub-types ──────────────────────────────────────────────────────
 
@@ -185,6 +187,7 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
   const [showManageModal,   setShowManageModal]   = useState(false)
   const [showConfetti,      setShowConfetti]      = useState(false)
   const [autoArchiveBanner, setAutoArchiveBanner] = useState<string | null>(null)
+  const [explainRow,        setExplainRow]        = useState<MemberRow | null>(null)
 
   const weekStart = getWeekStart()
   const weekEnd   = getWeekEnd(weekStart)
@@ -317,11 +320,22 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
       badgeInserts.push(
         supabase.from('badges').upsert({ user_id: winner, leaderboard_id: lb.id, badge_type: 'week_winner', meta: { week: weekStartIso } })
       )
+    }
+
+    // Notify every member — winner gets a special title, others get a recap
+    const winnerName = winner ? rowsForWeek.find(r => r.user_id === winner)?.profile?.full_name ?? 'A member' : null
+    for (const r of rowsForWeek) {
+      const isWinner = r.user_id === winner
       notifInserts.push({
-        user_id: winner, type: 'week_winner',
-        title: '👑 You won the week!',
-        body:  `You topped ${lb.name} for the week of ${formatWeekLabel(weekStartIso)}.`,
-        data:  { leaderboard_id: lb.id },
+        user_id: r.user_id,
+        type:    isWinner ? 'week_winner' : 'week_recap',
+        title:   isWinner
+          ? '👑 You won the week!'
+          : `📊 Week of ${formatWeekLabel(weekStartIso)} archived`,
+        body:    isWinner
+          ? `You topped ${lb.name} for the week of ${formatWeekLabel(weekStartIso)}.`
+          : `${winnerName ?? 'Someone'} won. You scored ${r.score.total} / 100.`,
+        data:    { leaderboard_id: lb.id, week_start: weekStartIso },
       })
     }
 
@@ -493,6 +507,7 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
             {lb.description && <p className="text-sm text-[#555] mt-1">{lb.description}</p>}
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            <NotificationsPanel leaderboardId={lb.id} />
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#1a1a1a] border border-[#2a2a2a]">
               <Hash className="w-3.5 h-3.5 text-[#555]" />
               <span className="font-mono text-sm tracking-widest text-white">{lb.invite_code}</span>
@@ -618,7 +633,7 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
                     </div>
                   </div>
 
-                  {/* Score + trend */}
+                  {/* Score + trend + explain */}
                   <div className="text-right shrink-0">
                     <div className="flex items-center justify-end gap-1">
                       <TrendPill trend={scoreTrend(row.user_id, row.score.total, archives)} />
@@ -626,7 +641,12 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
                         {row.score.total}
                       </p>
                     </div>
-                    <p className="text-[10px] text-[#555]">/ 100</p>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setExplainRow(row) }}
+                      className="text-[10px] text-[#555] hover:text-blue-400 transition-colors"
+                    >
+                      / 100 ⓘ
+                    </button>
                   </div>
 
                   {open ? <ChevronUp className="w-4 h-4 text-[#444]" /> : <ChevronDown className="w-4 h-4 text-[#444]" />}
@@ -852,6 +872,14 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
           }))}
           onClose={() => setShowManageModal(false)}
           onUpdated={load}
+        />
+      )}
+
+      {explainRow && (
+        <ScoreExplainerModal
+          score={explainRow.score}
+          username={explainRow.profile?.full_name ?? 'Unknown'}
+          onClose={() => setExplainRow(null)}
         />
       )}
     </div>

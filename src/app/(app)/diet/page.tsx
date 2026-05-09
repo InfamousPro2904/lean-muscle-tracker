@@ -65,6 +65,15 @@ function textColor(percent: number): string {
   return 'text-red-400'
 }
 
+/** "247 left" / "+150 over" / "Hit goal" — clearer than percent */
+function remainingLabel(consumed: number, target: number, unit: string): { text: string; color: string } {
+  if (target <= 0) return { text: '—', color: 'text-[#666]' }
+  const diff = target - consumed
+  if (diff > 0)  return { text: `${Math.round(diff)}${unit} left`,  color: 'text-green-400' }
+  if (diff === 0) return { text: 'Hit goal',                          color: 'text-yellow-400' }
+  return { text: `+${Math.round(-diff)}${unit} over`,                 color: 'text-red-400' }
+}
+
 // ── Search result type (unifies local + Open Food Facts) ───────────────────
 
 interface FoodResult {
@@ -151,6 +160,11 @@ export default function DietPage() {
   const [savingTemplate, setSavingTemplate] = useState(false)
   const [templateName,   setTemplateName]   = useState('')
   const [templatePromptOpen, setTemplatePromptOpen] = useState(false)
+
+  // Recent foods (last 30 days, distinct food names sorted by frequency)
+  const [recentFoods, setRecentFoods]   = useState<FoodResult[]>([])
+  const [showRecent,  setShowRecent]    = useState(false)
+
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // ── Auth & Profile ──────────────────────────────────────────────────────
@@ -336,6 +350,96 @@ export default function DietPage() {
   }, [userId, supabase])
 
   useEffect(() => { loadTemplates() }, [loadTemplates])
+
+  // ── Recent foods (distinct food names, last 30 days, by frequency) ─────
+
+  const loadRecentFoods = useCallback(async () => {
+    if (!userId) return
+    const thirtyAgo = new Date(Date.now() - 30 * 86400_000).toISOString().split('T')[0]
+    const { data } = await supabase
+      .from('meal_logs')
+      .select('food_name, calories, protein_g, carbs_g, fat_g, quantity')
+      .eq('user_id', userId)
+      .gte('date', thirtyAgo)
+      .order('created_at', { ascending: false })
+      .limit(200)
+
+    if (!data) return
+
+    // Group by food name; pick a representative entry; rank by count
+    const counts = new Map<string, number>()
+    const samples = new Map<string, FoodResult>()
+    for (const row of data as { food_name: string; calories: number; protein_g: number; carbs_g: number; fat_g: number; quantity: string | null }[]) {
+      const name = row.food_name
+      counts.set(name, (counts.get(name) ?? 0) + 1)
+      if (!samples.has(name)) {
+        // Convert "100g" or unknown → derive per-100g macros
+        const grams = row.quantity?.match(/(\d+)\s*g/i)?.[1]
+        const g = grams ? Number(grams) : 100
+        const scale = g > 0 ? 100 / g : 1
+        samples.set(name, {
+          name,
+          per100g: {
+            kcal:    Math.round(row.calories  * scale),
+            protein: Math.round(row.protein_g * scale * 10) / 10,
+            carbs:   Math.round(row.carbs_g   * scale * 10) / 10,
+            fat:     Math.round(row.fat_g     * scale * 10) / 10,
+          },
+          source: 'local',
+        })
+      }
+    }
+    const ranked = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 12)
+      .map(([name]) => samples.get(name)!)
+      .filter(Boolean)
+    setRecentFoods(ranked)
+  }, [userId, supabase])
+
+  useEffect(() => { loadRecentFoods() }, [loadRecentFoods])
+
+  // ── Copy yesterday's meal of the same meal_type into basket ─────────────
+
+  const copyYesterdaysMeal = async () => {
+    if (!userId) return
+    const yesterday = new Date(selectedDate)
+    yesterday.setDate(yesterday.getDate() - 1)
+    const { data } = await supabase
+      .from('meal_logs')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('date', formatDate(yesterday))
+      .eq('meal_type', mealType)
+      .order('created_at', { ascending: true })
+
+    if (!data || data.length === 0) {
+      setError(`No ${mealType.toLowerCase()} logged yesterday`)
+      setTimeout(() => setError(''), 2500)
+      return
+    }
+
+    // Convert each meal_log row to a basket item (derive per-100g from quantity if available)
+    const items: BasketItem[] = (data as MealLog[]).map(row => {
+      const grams = row.quantity?.match(/(\d+)\s*g/i)?.[1]
+      const g = grams ? Number(grams) : 100
+      const scale = g > 0 ? 100 / g : 1
+      return {
+        id:    genId(),
+        name:  row.food_name,
+        per100g: {
+          kcal:    Math.round(row.calories  * scale),
+          protein: Math.round(row.protein_g * scale * 10) / 10,
+          carbs:   Math.round(row.carbs_g   * scale * 10) / 10,
+          fat:     Math.round(row.fat_g     * scale * 10) / 10,
+        },
+        grams: g,
+      }
+    })
+    setBasket(items)
+    setLogMode('search')
+    setSearchQuery('')
+  }
 
   const loadTemplateIntoBasket = (tpl: MealTemplate) => {
     const items: BasketItem[] = tpl.items.map(it => ({
@@ -531,16 +635,64 @@ export default function DietPage() {
     }
   }
 
-  // ── Group meals by type ─────────────────────────────────────────────────
+  // ── Group meals by type, then by meal_session_id ─────────────────────────
+  // A multi-item logged meal (same meal_session_id) shows together; singles render alone.
+
+  type MealGroup =
+    | { kind: 'single';  meal: MealLog }
+    | { kind: 'session'; sessionId: string; meals: MealLog[] }
 
   const grouped = MEAL_TYPES.reduce(
     (acc, type) => {
       const items = meals.filter((m) => m.meal_type === type)
-      if (items.length > 0) acc[type] = items
+      if (items.length === 0) return acc
+
+      const groups: MealGroup[] = []
+      for (const m of items) {
+        if (m.meal_session_id) {
+          const existing = groups.find(g => g.kind === 'session' && g.sessionId === m.meal_session_id)
+          if (existing && existing.kind === 'session') {
+            existing.meals.push(m)
+          } else {
+            groups.push({ kind: 'session', sessionId: m.meal_session_id, meals: [m] })
+          }
+        } else {
+          groups.push({ kind: 'single', meal: m })
+        }
+      }
+
+      // Demote single-meal "sessions" to singletons
+      acc[type] = groups.map(g =>
+        g.kind === 'session' && g.meals.length === 1
+          ? { kind: 'single' as const, meal: g.meals[0] }
+          : g
+      )
       return acc
     },
-    {} as Record<string, MealLog[]>
+    {} as Record<string, MealGroup[]>
   )
+
+  // Helper for session totals
+  const sessionTotals = (rows: MealLog[]) => rows.reduce(
+    (t, m) => ({
+      kcal:    t.kcal    + m.calories,
+      protein: t.protein + m.protein_g,
+      carbs:   t.carbs   + m.carbs_g,
+      fat:     t.fat     + m.fat_g,
+    }),
+    { kcal: 0, protein: 0, carbs: 0, fat: 0 }
+  )
+
+  // ── Delete an entire session (multi-item meal) ──────────────────────────
+  const handleDeleteSession = async (sessionId: string) => {
+    if (!confirm('Delete all items in this meal?')) return
+    const { error: err } = await supabase.from('meal_logs').delete().eq('meal_session_id', sessionId)
+    if (err) { setError(err.message) }
+    else {
+      await fetchMeals()
+      await fetchWeekly()
+    }
+  }
 
   // ── Render ──────────────────────────────────────────────────────────────
 
@@ -594,7 +746,9 @@ export default function DietPage() {
                 style={{ width: `${Math.min(calPct, 100)}%` }}
               />
             </div>
-            <p className={`text-xs font-medium ${textColor(calPct)}`}>{calPct}%</p>
+            <p className={`text-[11px] font-medium ${remainingLabel(totals.calories, profile?.calorie_target ?? 0, '').color}`}>
+              {remainingLabel(totals.calories, profile?.calorie_target ?? 0, '').text}
+            </p>
           </div>
 
           {/* Protein */}
@@ -608,7 +762,9 @@ export default function DietPage() {
                 style={{ width: `${Math.min(protPct, 100)}%` }}
               />
             </div>
-            <p className={`text-xs font-medium ${textColor(protPct)}`}>{protPct}%</p>
+            <p className={`text-[11px] font-medium ${remainingLabel(totals.protein, profile?.protein_target ?? 0, 'g').color}`}>
+              {remainingLabel(totals.protein, profile?.protein_target ?? 0, 'g').text}
+            </p>
           </div>
 
           {/* Carbs */}
@@ -622,7 +778,9 @@ export default function DietPage() {
                 style={{ width: `${Math.min(carbPct, 100)}%` }}
               />
             </div>
-            <p className={`text-xs font-medium ${textColor(carbPct)}`}>{carbPct}%</p>
+            <p className={`text-[11px] font-medium ${remainingLabel(totals.carbs, profile?.carb_target ?? 0, 'g').color}`}>
+              {remainingLabel(totals.carbs, profile?.carb_target ?? 0, 'g').text}
+            </p>
           </div>
 
           {/* Fat */}
@@ -636,7 +794,9 @@ export default function DietPage() {
                 style={{ width: `${Math.min(fatPct, 100)}%` }}
               />
             </div>
-            <p className={`text-xs font-medium ${textColor(fatPct)}`}>{fatPct}%</p>
+            <p className={`text-[11px] font-medium ${remainingLabel(totals.fat, profile?.fat_target ?? 0, 'g').color}`}>
+              {remainingLabel(totals.fat, profile?.fat_target ?? 0, 'g').text}
+            </p>
           </div>
         </div>
       </section>
@@ -671,8 +831,8 @@ export default function DietPage() {
           </div>
         </div>
 
-        {/* Meal type selector — always visible */}
-        <div className="flex gap-2 flex-wrap">
+        {/* Meal type selector — always visible, with Copy Yesterday */}
+        <div className="flex gap-2 flex-wrap items-center">
           {MEAL_TYPES.map(t => (
             <button
               key={t}
@@ -686,6 +846,13 @@ export default function DietPage() {
               {t}
             </button>
           ))}
+          <button
+            onClick={copyYesterdaysMeal}
+            title={`Copy yesterday's ${mealType}`}
+            className="ml-auto px-3 py-1.5 rounded-lg text-[11px] font-medium border bg-blue-500/8 border-blue-500/20 text-blue-400 hover:bg-blue-500/15 flex items-center gap-1.5"
+          >
+            <ChevronLeft className="w-3 h-3" /> Copy yesterday
+          </button>
         </div>
 
         {logMode === 'manual' && (
@@ -1003,25 +1170,60 @@ export default function DietPage() {
               )
             })()}
 
-            {/* Quick foods grid (when no search active and basket empty) */}
+            {/* Quick foods + Recent foods (when no search active and basket empty) */}
             {!searchQuery && basket.length === 0 && (
-              <div>
-                <p className="text-xs text-[#444] mb-2 flex items-center gap-1.5">
-                  <Zap className="w-3 h-3 text-blue-400" /> Quick foods — tap to add to basket
-                </p>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {QUICK_FOODS.map((food, i) => (
+              <div className="space-y-4">
+                {/* Tab toggle: Quick / Recent */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowRecent(false)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-colors ${
+                      !showRecent ? 'bg-blue-500/15 text-blue-400' : 'text-[#666] hover:text-white'
+                    }`}
+                  >
+                    <Zap className="w-3 h-3" /> Quick foods
+                  </button>
+                  {recentFoods.length > 0 && (
                     <button
-                      key={i}
-                      onClick={() => addToBasket(foodItemToResult(food), food.portions?.[0]?.grams ?? 100)}
-                      className="flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-xl bg-[#161616] border border-[#222] hover:border-[#333] hover:bg-[#1a1a1a] text-left transition-colors"
+                      onClick={() => setShowRecent(true)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-colors ${
+                        showRecent ? 'bg-amber-500/15 text-amber-400' : 'text-[#666] hover:text-white'
+                      }`}
                     >
-                      <p className="text-xs font-medium leading-tight truncate w-full">{food.name}</p>
-                      <p className="text-[10px] text-orange-400">{food.per100g.kcal} kcal · P {food.per100g.protein}g</p>
+                      <Star className="w-3 h-3" /> Recent ({recentFoods.length})
                     </button>
-                  ))}
+                  )}
                 </div>
-                <p className="text-[10px] text-[#444] text-center mt-3">
+
+                {showRecent && recentFoods.length > 0 ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {recentFoods.map((food, i) => (
+                      <button
+                        key={i}
+                        onClick={() => addToBasket(food, 100)}
+                        className="flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-xl bg-[#161616] border border-[#222] hover:border-amber-500/30 hover:bg-amber-500/5 text-left transition-colors"
+                      >
+                        <p className="text-xs font-medium leading-tight truncate w-full">{food.name}</p>
+                        <p className="text-[10px] text-orange-400">{food.per100g.kcal} kcal · P {food.per100g.protein}g</p>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {QUICK_FOODS.map((food, i) => (
+                      <button
+                        key={i}
+                        onClick={() => addToBasket(foodItemToResult(food), food.portions?.[0]?.grams ?? 100)}
+                        className="flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-xl bg-[#161616] border border-[#222] hover:border-[#333] hover:bg-[#1a1a1a] text-left transition-colors"
+                      >
+                        <p className="text-xs font-medium leading-tight truncate w-full">{food.name}</p>
+                        <p className="text-[10px] text-orange-400">{food.per100g.kcal} kcal · P {food.per100g.protein}g</p>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <p className="text-[10px] text-[#444] text-center">
                   Tap multiple foods to build a meal · search for 200+ more (incl. Indian dishes)
                 </p>
               </div>
@@ -1044,154 +1246,118 @@ export default function DietPage() {
             No meals logged for this day. Add your first meal above.
           </div>
         ) : (
-          Object.entries(grouped).map(([type, items]) => (
-            <div key={type} className="card space-y-3">
-              <h3 className="text-sm font-semibold text-green-400 uppercase tracking-wide">
-                {type}
-              </h3>
-              <div className="space-y-2">
-                {items.map((meal) => (
-                  <div
-                    key={meal.id}
-                    className="bg-[#1a1a1a] rounded-lg p-3 flex flex-col sm:flex-row sm:items-center gap-3"
-                  >
-                    {editingId === meal.id ? (
-                      /* ── Inline Edit Mode ─── */
-                      <div className="flex-1 space-y-2">
-                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                          <input
-                            type="text"
-                            value={editForm.food_name ?? ''}
-                            onChange={(e) =>
-                              setEditForm({ ...editForm, food_name: e.target.value })
-                            }
-                            className="input text-sm"
-                            placeholder="Food name"
-                          />
-                          <input
-                            type="text"
-                            value={editForm.quantity ?? ''}
-                            onChange={(e) =>
-                              setEditForm({ ...editForm, quantity: e.target.value })
-                            }
-                            className="input text-sm"
-                            placeholder="Quantity"
-                          />
-                          <input
-                            type="text"
-                            value={editForm.notes ?? ''}
-                            onChange={(e) =>
-                              setEditForm({ ...editForm, notes: e.target.value })
-                            }
-                            className="input text-sm"
-                            placeholder="Notes"
-                          />
-                        </div>
-                        <div className="grid grid-cols-4 gap-2">
-                          <input
-                            type="number"
-                            value={editForm.calories ?? ''}
-                            onChange={(e) =>
-                              setEditForm({ ...editForm, calories: e.target.value })
-                            }
-                            className="input text-sm"
-                            placeholder="Cal"
-                          />
-                          <input
-                            type="number"
-                            value={editForm.protein_g ?? ''}
-                            onChange={(e) =>
-                              setEditForm({ ...editForm, protein_g: e.target.value })
-                            }
-                            className="input text-sm"
-                            placeholder="P"
-                          />
-                          <input
-                            type="number"
-                            value={editForm.carbs_g ?? ''}
-                            onChange={(e) =>
-                              setEditForm({ ...editForm, carbs_g: e.target.value })
-                            }
-                            className="input text-sm"
-                            placeholder="C"
-                          />
-                          <input
-                            type="number"
-                            value={editForm.fat_g ?? ''}
-                            onChange={(e) =>
-                              setEditForm({ ...editForm, fat_g: e.target.value })
-                            }
-                            className="input text-sm"
-                            placeholder="F"
-                          />
-                        </div>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => handleSaveEdit(meal.id)}
-                            className="btn-primary text-xs flex items-center gap-1 px-3 py-1.5"
-                          >
-                            <Save className="w-3 h-3" /> Save
-                          </button>
-                          <button
-                            onClick={() => {
-                              setEditingId(null)
-                              setEditForm({})
-                            }}
-                            className="btn-secondary text-xs px-3 py-1.5"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      /* ── Display Mode ─── */
-                      <>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <p className="font-medium truncate">{meal.food_name}</p>
-                            {meal.quantity && (
-                              <span className="badge-blue text-[10px] shrink-0">
-                                {meal.quantity}
-                              </span>
-                            )}
-                          </div>
-                          {meal.notes && (
-                            <p className="text-xs text-gray-500 mt-0.5 truncate">{meal.notes}</p>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-4 text-xs text-gray-400 shrink-0">
-                          <span className="text-orange-400 font-semibold">
-                            {meal.calories} cal
-                          </span>
-                          <span>P {meal.protein_g}g</span>
-                          <span>C {meal.carbs_g}g</span>
-                          <span>F {meal.fat_g}g</span>
-                        </div>
-
-                        <div className="flex items-center gap-1 shrink-0">
-                          <button
-                            onClick={() => startEdit(meal)}
-                            className="p-1.5 rounded-lg hover:bg-[#262626] text-gray-400 hover:text-white transition-colors"
-                            title="Edit"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => handleDelete(meal.id)}
-                            className="p-1.5 rounded-lg hover:bg-red-500/20 text-gray-400 hover:text-red-400 transition-colors"
-                            title="Delete"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </>
-                    )}
+          Object.entries(grouped).map(([type, groups]) => {
+            // Render a single meal row (display + inline edit)
+            const renderMealRow = (meal: MealLog, indent = false) => (
+              <div
+                key={meal.id}
+                className={`bg-[#1a1a1a] rounded-lg p-3 flex flex-col sm:flex-row sm:items-center gap-3 ${
+                  indent ? 'ml-3 border-l-2 border-green-500/20 pl-3' : ''
+                }`}
+              >
+                {editingId === meal.id ? (
+                  <div className="flex-1 space-y-2">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <input type="text" value={editForm.food_name ?? ''}
+                        onChange={(e) => setEditForm({ ...editForm, food_name: e.target.value })}
+                        className="input text-sm" placeholder="Food name" />
+                      <input type="text" value={editForm.quantity ?? ''}
+                        onChange={(e) => setEditForm({ ...editForm, quantity: e.target.value })}
+                        className="input text-sm" placeholder="Quantity" />
+                      <input type="text" value={editForm.notes ?? ''}
+                        onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })}
+                        className="input text-sm" placeholder="Notes" />
+                    </div>
+                    <div className="grid grid-cols-4 gap-2">
+                      <input type="number" value={editForm.calories ?? ''}
+                        onChange={(e) => setEditForm({ ...editForm, calories: e.target.value })}
+                        className="input text-sm" placeholder="Cal" />
+                      <input type="number" value={editForm.protein_g ?? ''}
+                        onChange={(e) => setEditForm({ ...editForm, protein_g: e.target.value })}
+                        className="input text-sm" placeholder="P" />
+                      <input type="number" value={editForm.carbs_g ?? ''}
+                        onChange={(e) => setEditForm({ ...editForm, carbs_g: e.target.value })}
+                        className="input text-sm" placeholder="C" />
+                      <input type="number" value={editForm.fat_g ?? ''}
+                        onChange={(e) => setEditForm({ ...editForm, fat_g: e.target.value })}
+                        className="input text-sm" placeholder="F" />
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={() => handleSaveEdit(meal.id)} className="btn-primary text-xs flex items-center gap-1 px-3 py-1.5">
+                        <Save className="w-3 h-3" /> Save
+                      </button>
+                      <button onClick={() => { setEditingId(null); setEditForm({}) }} className="btn-secondary text-xs px-3 py-1.5">
+                        Cancel
+                      </button>
+                    </div>
                   </div>
-                ))}
+                ) : (
+                  <>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="font-medium truncate">{meal.food_name}</p>
+                        {meal.quantity && <span className="badge-blue text-[10px] shrink-0">{meal.quantity}</span>}
+                      </div>
+                      {meal.notes && <p className="text-xs text-gray-500 mt-0.5 truncate">{meal.notes}</p>}
+                    </div>
+                    <div className="flex items-center gap-4 text-xs text-gray-400 shrink-0">
+                      <span className="text-orange-400 font-semibold">{meal.calories} cal</span>
+                      <span>P {meal.protein_g}g</span>
+                      <span>C {meal.carbs_g}g</span>
+                      <span>F {meal.fat_g}g</span>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button onClick={() => startEdit(meal)} className="p-1.5 rounded-lg hover:bg-[#262626] text-gray-400 hover:text-white transition-colors" title="Edit">
+                        <Edit3 className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => handleDelete(meal.id)} className="p-1.5 rounded-lg hover:bg-red-500/20 text-gray-400 hover:text-red-400 transition-colors" title="Delete">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
-            </div>
-          ))
+            )
+
+            return (
+              <div key={type} className="card space-y-3">
+                <h3 className="text-sm font-semibold text-green-400 uppercase tracking-wide">{type}</h3>
+                <div className="space-y-2">
+                  {groups.map((g, idx) => {
+                    if (g.kind === 'single') return renderMealRow(g.meal)
+                    // Session: header + indented items
+                    const t = sessionTotals(g.meals)
+                    return (
+                      <div key={g.sessionId} className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2 px-2 py-1.5 bg-green-500/8 border border-green-500/15 rounded-lg">
+                          <div className="flex items-center gap-2 text-[11px]">
+                            <ShoppingBasket className="w-3 h-3 text-green-400" />
+                            <span className="text-green-400 font-medium">Multi-item meal</span>
+                            <span className="text-[#666]">· {g.meals.length} items</span>
+                          </div>
+                          <div className="flex items-center gap-3 text-[11px]">
+                            <span className="text-orange-400 font-semibold">{Math.round(t.kcal)} cal</span>
+                            <span className="text-[#666]">P {Math.round(t.protein * 10) / 10}g · C {Math.round(t.carbs * 10) / 10}g · F {Math.round(t.fat * 10) / 10}g</span>
+                            <button
+                              onClick={() => handleDeleteSession(g.sessionId)}
+                              className="p-1 rounded hover:bg-red-500/20 text-[#666] hover:text-red-400 transition-colors"
+                              title="Delete entire meal"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </div>
+                        <div className="space-y-1.5">
+                          {g.meals.map(m => renderMealRow(m, true))}
+                        </div>
+                        {idx < groups.length - 1 && <div className="h-px" />}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })
         )}
       </section>
 
