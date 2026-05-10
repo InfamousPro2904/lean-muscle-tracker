@@ -12,6 +12,7 @@ import { createClient } from '@/lib/supabase'
 import type { Profile, MealLog, WorkoutLog, ProgressLog, DailyLog, WorkoutRoutine, Badge } from '@/lib/types'
 import { getWeekStartIso, getWeekEndIso, todayIsoLocal, formatWeekRange, daysAgoIsoLocal } from '@/lib/week'
 import { calculateStreak, BADGE_DEFINITIONS } from '@/lib/scoring'
+import { lastWeekRange, computeDelta, pickSmartAction, type SmartAction, shouldSendStreakReminder, markStreakReminderSent } from '@/lib/insights'
 import { MUSCLE_GROUPS as PRESET_GROUPS } from '@/lib/exercise-presets'
 import {
   LEAN_MUSCLE_ROUTINE_NAME,
@@ -260,6 +261,11 @@ export default function DashboardPage() {
   const [todayRoutines, setTodayRoutines] = useState<WorkoutRoutine[]>([])
   const [recentBadges, setRecentBadges] = useState<Badge[]>([])
   const [latestProgress, setLatestProgress] = useState<ProgressLog | null>(null)
+  const [recentProgress, setRecentProgress] = useState<ProgressLog[]>([])
+  // Last-week aggregates for delta arrows (A4)
+  const [lastWeekDailyLogs, setLastWeekDailyLogs] = useState<DailyLog[]>([])
+  const [lastWeekMeals,     setLastWeekMeals]     = useState<MealLog[]>([])
+  const [lastWeekWorkouts,  setLastWeekWorkouts]  = useState<WorkoutLog[]>([])
   const [loading, setLoading] = useState(true)
 
   // Planner state
@@ -286,10 +292,12 @@ export default function DashboardPage() {
     // Today's day-of-week index (0=Sun..6=Sat) — used to filter scheduled routines
     const todayDow = new Date().getDay()
     const ninetyAgo = daysAgoIsoLocal(90)
+    const lastWeek = lastWeekRange()
 
     const [
       profileRes, todayMealsRes, weekMealsRes, workoutsRes, progressRes,
       todayDailyRes, weekDailyRes, recentDailyRes, routinesRes, badgesRes,
+      recentProgressRes, lastWeekDailyRes, lastWeekMealsRes, lastWeekWorkoutsRes,
     ] = await Promise.all([
       supabase.from('profiles').select('*').eq('id', user.id).single(),
       supabase.from('meal_logs').select('*').eq('user_id', user.id).eq('date', today),
@@ -306,6 +314,16 @@ export default function DashboardPage() {
         .contains('day_of_week', [todayDow]),
       supabase.from('badges').select('*').eq('user_id', user.id)
         .order('earned_at', { ascending: false }).limit(8),
+      // Last 14 days of progress logs for the 7-day weight average
+      supabase.from('progress_logs').select('*').eq('user_id', user.id)
+        .gte('date', daysAgoIsoLocal(14)).order('date', { ascending: false }),
+      // Last week aggregates for delta arrows
+      supabase.from('daily_logs').select('*').eq('user_id', user.id)
+        .gte('date', lastWeek.start).lte('date', lastWeek.end),
+      supabase.from('meal_logs').select('*').eq('user_id', user.id)
+        .gte('date', lastWeek.start).lte('date', lastWeek.end),
+      supabase.from('workout_logs').select('id, date').eq('user_id', user.id)
+        .gte('date', lastWeek.start).lte('date', lastWeek.end),
     ])
 
     if (profileRes.data) setProfile(profileRes.data)
@@ -318,6 +336,37 @@ export default function DashboardPage() {
     if (recentDailyRes.data) setRecentDailyLogs(recentDailyRes.data as DailyLog[])
     if (routinesRes.data) setTodayRoutines(routinesRes.data as WorkoutRoutine[])
     if (badgesRes.data) setRecentBadges(badgesRes.data as Badge[])
+    if (recentProgressRes.data) setRecentProgress(recentProgressRes.data as ProgressLog[])
+    if (lastWeekDailyRes.data)    setLastWeekDailyLogs(lastWeekDailyRes.data as DailyLog[])
+    if (lastWeekMealsRes.data)    setLastWeekMeals(lastWeekMealsRes.data as MealLog[])
+    if (lastWeekWorkoutsRes.data) setLastWeekWorkouts(lastWeekWorkoutsRes.data as WorkoutLog[])
+
+    // ─── A7: Streak-protection notification ───
+    // After 8 PM, if streak ≥ 3 and nothing logged today → insert a one-time
+    // reminder. localStorage dedup so refreshing doesn't spam.
+    try {
+      const streakDays = calculateStreak((recentDailyRes.data ?? []) as DailyLog[])
+      const todayDaily = todayDailyRes.data as DailyLog | null
+      const hasLoggedToday =
+        (todayMealsRes.data && todayMealsRes.data.length > 0) ||
+        (todayDaily?.workout_done ?? false) ||
+        (todayDaily?.is_rest_day ?? false) ||
+        ((todayDaily?.kcal_in ?? 0) > 0) ||
+        ((todayDaily?.kcal_burnt ?? 0) > 0)
+      if (shouldSendStreakReminder({ streakDays, hasLoggedToday })) {
+        await supabase.from('notifications').insert({
+          user_id: user.id,
+          type:    'streak_reminder',
+          title:   `🔥 Keep your ${streakDays}-day streak alive`,
+          body:    'Log a meal, workout, or rest day before midnight.',
+          data:    { streak: streakDays },
+        })
+        markStreakReminderSent()
+      }
+    } catch {
+      // Non-blocking
+    }
+
     setLoading(false)
   }, [supabase])
 
@@ -509,6 +558,44 @@ export default function DashboardPage() {
         </section>
       )}
 
+      {/* ── Smart Action Card (C1) — single context-aware CTA ── */}
+      {(() => {
+        const today = todayIsoLocal()
+        const todayDaily = weekDailyLogs.find(d => d.date === today)
+        const todayMealTypes = new Set(todayMeals.map(m => m.meal_type))
+        const lastProg = recentProgress[0]
+        const daysSinceWeighIn = lastProg
+          ? Math.floor((Date.now() - new Date(lastProg.date + 'T12:00:00').getTime()) / 86400000)
+          : Infinity
+        const action: SmartAction | null = pickSmartAction({
+          hasBreakfastToday:   todayMealTypes.has('Breakfast'),
+          hasLunchToday:       todayMealTypes.has('Lunch'),
+          hasDinnerToday:      todayMealTypes.has('Dinner'),
+          hasPostWorkoutToday: todayMealTypes.has('Post-Workout'),
+          hasWorkoutToday:     (todayDaily?.workout_done ?? false) || weekWorkouts.some(w => w.date === today),
+          scheduledTodayCount: todayRoutines.length,
+          daysSinceWeighIn,
+        })
+        if (!action) return null
+        return (
+          <section className="card border-blue-500/20 flex items-center gap-4">
+            <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center shrink-0">
+              <Sparkles className="w-5 h-5 text-blue-400" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold">{action.title}</p>
+              <p className="text-[11px] text-[#777] mt-0.5">{action.body}</p>
+            </div>
+            <Link
+              href={action.href}
+              className="btn-primary text-xs shrink-0 flex items-center gap-1.5"
+            >
+              {action.ctaText} →
+            </Link>
+          </section>
+        )
+      })()}
+
       {/* ── Quick stat cards ── */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         {/* Calories in */}
@@ -559,20 +646,34 @@ export default function DashboardPage() {
           </p>
         </div>
 
-        {/* Body weight */}
+        {/* Body weight + 7-day average (A5) */}
         <div className="card">
           <p className="text-xs text-[#555] flex items-center gap-1 mb-2"><TrendingUp className="w-3 h-3 text-blue-400" /> Body Weight</p>
           <p className="text-3xl font-bold">
             {latestProgress?.weight_kg ? `${latestProgress.weight_kg}` : '—'}
           </p>
-          <p className="text-[10px] text-[#555] mt-1">
-            {latestProgress?.weight_kg ? 'kg' : 'No data'}
-            {latestProgress?.date && ` · ${new Date(latestProgress.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}
-          </p>
+          {(() => {
+            const last7 = recentProgress.filter(p => p.weight_kg != null).slice(0, 7)
+            if (last7.length < 2) {
+              return (
+                <p className="text-[10px] text-[#555] mt-1">
+                  {latestProgress?.weight_kg ? 'kg' : 'No data'}
+                  {latestProgress?.date && ` · ${new Date(latestProgress.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`}
+                </p>
+              )
+            }
+            const avg = last7.reduce((s, p) => s + (p.weight_kg ?? 0), 0) / last7.length
+            const avgRounded = Math.round(avg * 10) / 10
+            return (
+              <p className="text-[10px] text-[#555] mt-1">
+                kg · 7-day avg <span className="text-blue-400 font-semibold">{avgRounded}</span>
+              </p>
+            )
+          })()}
         </div>
       </div>
 
-      {/* ── This Week Summary ── */}
+      {/* ── This Week Summary (with last-week delta arrows, A4) ── */}
       {(() => {
         const weekStart    = getWeekStartIso()
         const totalKcalIn  = weekMeals.reduce((s, m) => s + (m.calories ?? 0), 0)
@@ -585,9 +686,35 @@ export default function DashboardPage() {
         const today = todayIsoLocal()
         const dayOfWeek = (() => {
           const d = new Date()
-          return d.getDay() === 0 ? 7 : d.getDay()  // Mon=1..Sun=7
+          return d.getDay() === 0 ? 7 : d.getDay()
         })()
         const avgDailyKcal = totalKcalIn > 0 ? Math.round(totalKcalIn / Math.max(1, activeDates.size)) : 0
+
+        // Last week aggregates for delta arrows
+        const lwKcalIn  = lastWeekMeals.reduce((s, m) => s + (m.calories ?? 0), 0)
+        const lwKcalOut = lastWeekDailyLogs.reduce((s, d) => s + (d.kcal_burnt ?? 0), 0)
+        const lwActive  = new Set([
+          ...lastWeekDailyLogs.filter(d => d.workout_done || d.kcal_in > 0 || d.is_rest_day).map(d => d.date),
+          ...lastWeekMeals.map(m => m.date),
+          ...lastWeekWorkouts.map(w => w.date),
+        ])
+
+        // Delta = current - previous; render arrow + magnitude
+        const deltaWorkouts = computeDelta(weekWorkouts.length, lastWeekWorkouts.length)
+        const deltaBurnt    = computeDelta(totalKcalOut, lwKcalOut, 50)   // 50 kcal noise floor
+        const deltaIn       = computeDelta(totalKcalIn,  lwKcalIn,  100)
+        const deltaActive   = computeDelta(activeDates.size, lwActive.size)
+
+        type DeltaCell = { current: number; trend: 'up' | 'down' | 'flat'; diff: number }
+        const renderDelta = (d: DeltaCell, positiveIsGood: boolean, suffix = '') => {
+          if (d.trend === 'flat') return <span className="text-[#555]">→ same as last week</span>
+          const isGood = positiveIsGood ? d.trend === 'up' : d.trend === 'down'
+          const color = isGood ? 'text-emerald-400' : 'text-red-400'
+          const arrow = d.trend === 'up' ? '↑' : '↓'
+          const abs = Math.abs(d.diff)
+          return <span className={color}>{arrow} {abs}{suffix} vs last week</span>
+        }
+
         return (
           <section className="card space-y-3">
             <div className="flex items-center justify-between flex-wrap gap-2">
@@ -604,22 +731,24 @@ export default function DashboardPage() {
               <div className="bg-[#0e0e0e] rounded-xl p-3 text-center">
                 <p className="text-[10px] text-[#666] uppercase tracking-wider mb-1">Workouts</p>
                 <p className="text-2xl font-bold">{weekWorkouts.length}</p>
-                <p className="text-[10px] text-[#555]">sessions</p>
+                <p className="text-[10px]">{renderDelta(deltaWorkouts, true)}</p>
               </div>
               <div className="bg-[#0e0e0e] rounded-xl p-3 text-center">
                 <p className="text-[10px] text-[#666] uppercase tracking-wider mb-1">Burnt</p>
                 <p className="text-2xl font-bold text-emerald-400">{totalKcalOut}</p>
-                <p className="text-[10px] text-[#555]">kcal</p>
+                <p className="text-[10px]">{renderDelta(deltaBurnt, true, ' kcal')}</p>
               </div>
               <div className="bg-[#0e0e0e] rounded-xl p-3 text-center">
                 <p className="text-[10px] text-[#666] uppercase tracking-wider mb-1">Calories in</p>
                 <p className="text-2xl font-bold text-orange-400">{totalKcalIn}</p>
                 <p className="text-[10px] text-[#555]">{avgDailyKcal > 0 ? `avg ${avgDailyKcal}/day` : 'kcal'}</p>
+                <p className="text-[10px] mt-0.5">{renderDelta(deltaIn, true, ' kcal')}</p>
               </div>
               <div className="bg-[#0e0e0e] rounded-xl p-3 text-center">
                 <p className="text-[10px] text-[#666] uppercase tracking-wider mb-1">Active days</p>
                 <p className="text-2xl font-bold text-blue-400">{activeDates.size}</p>
                 <p className="text-[10px] text-[#555]">/ {dayOfWeek} so far</p>
+                <p className="text-[10px] mt-0.5">{renderDelta(deltaActive, true)}</p>
               </div>
             </div>
           </section>

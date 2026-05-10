@@ -766,30 +766,36 @@ export default function ProgressPage() {
                 </tr>
               </thead>
               <tbody>
-                {logsDescending.map((log) => (
+                {logsDescending.map((log, idx) => {
+                  // B4: per-measurement delta vs the next-older entry
+                  const older = logsDescending[idx + 1] // older = larger index in descending list
+                  const renderDelta = (curr: number | null, prev: number | null | undefined, suffix: string) => {
+                    if (curr === null) return <span className="text-gray-600">-</span>
+                    if (prev === null || prev === undefined) {
+                      return <span>{curr}{suffix}</span>
+                    }
+                    const diff = Math.round((curr - prev) * 10) / 10
+                    if (Math.abs(diff) < 0.05) return <span>{curr}{suffix} <span className="text-gray-600 text-[10px]">→</span></span>
+                    const color = diff > 0 ? 'text-amber-400' : 'text-emerald-400'
+                    const arrow = diff > 0 ? '↑' : '↓'
+                    return (
+                      <span>
+                        {curr}{suffix} <span className={`${color} text-[10px] ml-0.5`}>{arrow}{Math.abs(diff)}</span>
+                      </span>
+                    )
+                  }
+                  return (
                   <tr
                     key={log.id}
                     className="border-b border-white/5 hover:bg-white/5 transition-colors"
                   >
                     <td className="py-3 pr-4 whitespace-nowrap">{log.date}</td>
-                    <td className="py-3 pr-4">
-                      {log.weight_kg !== null ? `${log.weight_kg} kg` : '-'}
-                    </td>
-                    <td className="py-3 pr-4">
-                      {log.body_fat_pct !== null ? `${log.body_fat_pct}%` : '-'}
-                    </td>
-                    <td className="py-3 pr-4">
-                      {log.chest_cm !== null ? `${log.chest_cm}` : '-'}
-                    </td>
-                    <td className="py-3 pr-4">
-                      {log.waist_cm !== null ? `${log.waist_cm}` : '-'}
-                    </td>
-                    <td className="py-3 pr-4">
-                      {log.arms_cm !== null ? `${log.arms_cm}` : '-'}
-                    </td>
-                    <td className="py-3 pr-4">
-                      {log.thighs_cm !== null ? `${log.thighs_cm}` : '-'}
-                    </td>
+                    <td className="py-3 pr-4">{renderDelta(log.weight_kg,    older?.weight_kg,    ' kg')}</td>
+                    <td className="py-3 pr-4">{renderDelta(log.body_fat_pct, older?.body_fat_pct, '%')}</td>
+                    <td className="py-3 pr-4">{renderDelta(log.chest_cm,     older?.chest_cm,     '')}</td>
+                    <td className="py-3 pr-4">{renderDelta(log.waist_cm,     older?.waist_cm,     '')}</td>
+                    <td className="py-3 pr-4">{renderDelta(log.arms_cm,      older?.arms_cm,      '')}</td>
+                    <td className="py-3 pr-4">{renderDelta(log.thighs_cm,    older?.thighs_cm,    '')}</td>
                     <td className="py-3 pr-4 max-w-[200px] truncate text-gray-400">
                       {log.notes || '-'}
                     </td>
@@ -803,7 +809,8 @@ export default function ProgressPage() {
                       </button>
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>

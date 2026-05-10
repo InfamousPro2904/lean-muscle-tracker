@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase'
 import { MealLog, Profile, MEAL_TYPES, MealTemplate, BasketItem, Macros100g } from '@/lib/types'
 import { QUICK_FOODS, searchFoods, type FoodItem } from '@/lib/foods'
+import { defaultMealTypeForNow } from '@/lib/insights'
 import { getWeekStartIso, getWeekEndIso, toIsoLocal, daysAgoIsoLocal } from '@/lib/week'
 import FoodItemEditor, { type EditableFood } from '@/components/diet/FoodItemEditor'
 import TemplateEditorModal from '@/components/diet/TemplateEditorModal'
@@ -35,6 +36,9 @@ import {
   ResponsiveContainer,
   ReferenceLine,
   CartesianGrid,
+  PieChart,
+  Pie,
+  Cell,
 } from 'recharts'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -185,7 +189,7 @@ export default function DietPage() {
   const [searchQuery,   setSearchQuery]   = useState('')
   const [searchResults, setSearchResults] = useState<FoodResult[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
-  const [mealType,      setMealType]      = useState<string>(MEAL_TYPES[0])
+  const [mealType,      setMealType]      = useState<string>(() => defaultMealTypeForNow())
   const [logNotes,      setLogNotes]      = useState('')
   const [basket,        setBasket]        = useState<BasketItem[]>([])
   const [editingGramsId, setEditingGramsId] = useState<string | null>(null)
@@ -214,6 +218,36 @@ export default function DietPage() {
       setLogMode('search')
     }
   }, [])
+
+  // ─── C3: Persist basket to localStorage scoped by date ──────────────────
+  // Hydrate once on mount; persist on every basket change. Cleared after
+  // logging or when the date changes (yesterday's basket shouldn't appear).
+  const basketKey = `diet_basket_${formatDate(selectedDate)}`
+  // Hydrate
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      const raw = window.localStorage.getItem(basketKey)
+      if (!raw) return
+      const parsed = JSON.parse(raw) as BasketItem[]
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        setBasket(parsed)
+        setLogMode('search')
+      }
+    } catch {
+      // bad JSON — ignore
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [basketKey])
+  // Persist
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (basket.length === 0) {
+      window.localStorage.removeItem(basketKey)
+    } else {
+      window.localStorage.setItem(basketKey, JSON.stringify(basket))
+    }
+  }, [basket, basketKey])
 
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -826,6 +860,51 @@ export default function DietPage() {
             <ChevronRight className="w-4 h-4" />
           </button>
         </div>
+
+        {/* Macro-balance donut (B3) — calorie split among P/C/F */}
+        {(() => {
+          const proteinCal = totals.protein * 4
+          const carbsCal   = totals.carbs   * 4
+          const fatCal     = totals.fat     * 9
+          const macroCal   = proteinCal + carbsCal + fatCal
+          if (macroCal < 50) return null  // hide until meaningful data
+          const data = [
+            { name: 'Protein', value: Math.round(proteinCal), color: '#3b82f6' },
+            { name: 'Carbs',   value: Math.round(carbsCal),   color: '#f59e0b' },
+            { name: 'Fat',     value: Math.round(fatCal),     color: '#ef4444' },
+          ]
+          const pct = (v: number) => Math.round((v / macroCal) * 100)
+          return (
+            <div className="flex items-center gap-4 -mt-1">
+              <div className="w-20 h-20 shrink-0">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={data} dataKey="value" innerRadius={22} outerRadius={36}
+                      strokeWidth={0} startAngle={90} endAngle={450}
+                    >
+                      {data.map((d, i) => <Cell key={i} fill={d.color} />)}
+                    </Pie>
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="flex-1 grid grid-cols-3 gap-2 text-xs">
+                <div>
+                  <p className="text-blue-400 font-semibold">{pct(proteinCal)}%</p>
+                  <p className="text-[10px] text-[#666]">Protein</p>
+                </div>
+                <div>
+                  <p className="text-amber-400 font-semibold">{pct(carbsCal)}%</p>
+                  <p className="text-[10px] text-[#666]">Carbs</p>
+                </div>
+                <div>
+                  <p className="text-red-400 font-semibold">{pct(fatCal)}%</p>
+                  <p className="text-[10px] text-[#666]">Fat</p>
+                </div>
+              </div>
+            </div>
+          )
+        })()}
 
         {/* Macro Big Numbers */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

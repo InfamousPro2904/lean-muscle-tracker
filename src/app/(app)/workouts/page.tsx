@@ -22,6 +22,7 @@ import {
   BookOpen, Check, Undo2, AlertTriangle, Coffee, Flame
 } from 'lucide-react'
 import { estimateWorkoutKcal } from '@/lib/kcal'
+import { findNewPRs, summarizePRs, computeVolumeStats } from '@/lib/prs'
 import { getIsoWeekNumber, getIsoWeekYear, getWeekStartIso, formatWeekRange, todayIsoLocal } from '@/lib/week'
 import PresetPicker, { type PresetSelection } from '@/components/workouts/PresetPicker'
 
@@ -59,8 +60,10 @@ interface UndoPending {
 // Must be isolated here so it can be Suspense-wrapped
 function PresetQueryReader({
   onPreset,
+  onTab,
 }: {
   onPreset: (name: string, muscle: string, sets: string, reps: string) => void
+  onTab:    (tab: Tab) => void
 }) {
   const searchParams = useSearchParams()
   useEffect(() => {
@@ -72,7 +75,11 @@ function PresetQueryReader({
       onPreset(name, muscle, sets, reps)
       window.history.replaceState({}, '', '/workouts')
     }
-  }, [searchParams, onPreset])
+    const tab = searchParams.get('tab')
+    if (tab === 'log' || tab === 'routines' || tab === 'history') {
+      onTab(tab as Tab)
+    }
+  }, [searchParams, onPreset, onTab])
   return null
 }
 
@@ -116,6 +123,13 @@ export default function WorkoutsPage() {
 
   // ─── Post-workout refuel toast (Phase 1.1) ───
   const [refuelToast, setRefuelToast] = useState<{ kcal: number } | null>(null)
+
+  // ─── Last-session lookup (A1 auto-fill + B1 "Last: X" hints) ───
+  // Map from exercise_name → most recent { reps, weight_kg } across all
+  // workout history. Used to prefill new sets and surface a hint per exercise.
+  const [lastSetByExercise, setLastSetByExercise] = useState<Map<string, { reps: number | null; weight_kg: number | null; date: string }>>(
+    new Map()
+  )
 
   // ─── Delete confirmation + undo ───
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
@@ -270,6 +284,33 @@ export default function WorkoutsPage() {
         })
       )
       setWorkoutLogs(logsWithExercises)
+
+      // Build last-session map for A1 auto-fill and B1 hints.
+      // Walk from newest → oldest; first match wins for each exercise name.
+      // Within the same session, prefer the heaviest set (best signal).
+      const lastMap = new Map<string, { reps: number | null; weight_kg: number | null; date: string }>()
+      for (const log of logsWithExercises) {
+        const allSets: ExerciseLog[] = log.exercise_logs ?? []
+        for (const e of allSets) {
+          if (lastMap.has(e.exercise_name)) continue
+          // For the most recent session featuring this exercise, find the
+          // heaviest set so the hint reflects the user's working set.
+          const sameExerciseSets: ExerciseLog[] = allSets.filter(s => s.exercise_name === e.exercise_name)
+          let heaviest: ExerciseLog | null = null
+          for (const cur of sameExerciseSets) {
+            const w = cur.weight_kg ?? 0
+            if (!heaviest || w > (heaviest.weight_kg ?? 0)) heaviest = cur
+          }
+          if (heaviest) {
+            lastMap.set(e.exercise_name, {
+              reps:      heaviest.reps,
+              weight_kg: heaviest.weight_kg,
+              date:      log.date,
+            })
+          }
+        }
+      }
+      setLastSetByExercise(lastMap)
     }
   }, [userId, supabase])
 
@@ -282,6 +323,27 @@ export default function WorkoutsPage() {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
     if (undoIntervalRef.current) clearInterval(undoIntervalRef.current)
   }, [])
+
+  // ─── A2: Auto-detect today's routine when Log tab opens ───
+  // If user opens Log tab with no routine selected and no exercises queued,
+  // and exactly ONE active routine matches today's day-of-week → auto-pick.
+  // Only fires once per Log-tab visit (tracked by a ref).
+  const autoSelectedRef = useRef(false)
+  useEffect(() => {
+    if (activeTab !== 'log') { autoSelectedRef.current = false; return }
+    if (autoSelectedRef.current) return
+    if (selectedRoutineId || exerciseEntries.length > 0) return
+    if (routines.length === 0) return
+    const todayDow = new Date().getDay()
+    const todayMatches = routines.filter(r =>
+      Array.isArray(r.day_of_week) && r.day_of_week.includes(todayDow)
+    )
+    if (todayMatches.length === 1) {
+      handleSelectRoutine(todayMatches[0].id)
+      autoSelectedRef.current = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, routines, selectedRoutineId, exerciseEntries.length])
 
   // ─── Undo helpers ───
   const clearUndoTimers = () => {
@@ -411,16 +473,22 @@ export default function WorkoutsPage() {
     if (routineId) {
       const routine = routines.find(r => r.id === routineId)
       if (routine?.exercises) {
+        // Pre-fill weights from the user's last session for each exercise (A1).
+        // Same target reps as the routine spec, but the WEIGHT is hydrated
+        // from history. User just adjusts up/down for progressive overload.
         setExerciseEntries(
-          routine.exercises.map(ex => ({
-            exercise_name: ex.exercise_name,
-            muscle_group: ex.muscle_group,
-            sets: Array.from({ length: ex.sets }, (_, i) => ({
-              set_number: i + 1,
-              reps: parseInt(ex.reps) || null,
-              weight_kg: null,
-            })),
-          }))
+          routine.exercises.map(ex => {
+            const last = lastSetByExercise.get(ex.exercise_name)
+            return {
+              exercise_name: ex.exercise_name,
+              muscle_group: ex.muscle_group,
+              sets: Array.from({ length: ex.sets }, (_, i) => ({
+                set_number: i + 1,
+                reps: parseInt(ex.reps) || last?.reps || null,
+                weight_kg: last?.weight_kg ?? null,
+              })),
+            }
+          })
         )
         setCustomWorkoutName('')
       }
@@ -603,6 +671,53 @@ export default function WorkoutsPage() {
       }
     }
 
+    // ─── A6: PR detection + notification ──────────────────────────────────
+    // Compare this session's best sets against the user's full history (excl.
+    // this session itself, since we just inserted it). Insert a notification
+    // for each PR — surfaces in the global navbar bell automatically.
+    try {
+      const newSets = exerciseEntries.flatMap(e =>
+        e.sets.map(s => ({ exercise_name: e.exercise_name, reps: s.reps, weight_kg: s.weight_kg }))
+      )
+      // Only fetch history that's relevant (last 6 months) to keep payload small
+      const sixMonthsAgo = (() => {
+        const d = new Date(); d.setMonth(d.getMonth() - 6)
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+      })()
+      const { data: priorLogs } = await supabase
+        .from('workout_logs')
+        .select('id, date, exercise_logs(exercise_name, reps, weight_kg)')
+        .eq('user_id', userId)
+        .lt('date', logDate)  // strict less-than: don't include today's session
+        .gte('date', sixMonthsAgo)
+
+      const flatPrior: Array<{ exercise_name: string; reps: number | null; weight_kg: number | null; date: string }> = []
+      for (const wl of (priorLogs ?? []) as Array<{ date: string; exercise_logs?: Array<{ exercise_name: string; reps: number | null; weight_kg: number | null }> }>) {
+        for (const e of wl.exercise_logs ?? []) {
+          flatPrior.push({ ...e, date: wl.date })
+        }
+      }
+      const historicalPRs = summarizePRs(flatPrior)
+      const newPRs = findNewPRs(newSets, historicalPRs)
+
+      if (newPRs.length > 0) {
+        const inserts = newPRs.map(pr => ({
+          user_id: userId,
+          type:    'pr',
+          title:   `🏆 New PR: ${pr.exercise}`,
+          body:    pr.kind === 'max_weight'
+            ? `${pr.newWeight} kg × ${pr.newReps} (was ${pr.prevWeight} kg)`
+            : pr.kind === 'max_1rm'
+              ? `Estimated 1RM ${pr.new1RM} kg (was ${pr.prev1RM} kg)`
+              : `${pr.newWeight} kg × ${pr.newReps} · 1RM ≈ ${pr.new1RM} kg`,
+          data: { exercise: pr.exercise, weight: pr.newWeight, reps: pr.newReps, oneRm: pr.new1RM },
+        }))
+        await supabase.from('notifications').insert(inserts)
+      }
+    } catch {
+      // PR detection is non-blocking — fail silently
+    }
+
     setSelectedRoutineId(''); setCustomWorkoutName('')
     setLogDate(todayIsoLocal()); setLogDuration('')
     setLogNotes(''); setExerciseEntries([]); setIsRestDay(false)
@@ -669,7 +784,7 @@ export default function WorkoutsPage() {
     <div className="max-w-5xl mx-auto space-y-6 pb-20">
       {/* URL param reader — must be in Suspense per Next.js 16 */}
       <Suspense fallback={null}>
-        <PresetQueryReader onPreset={handlePresetQuery} />
+        <PresetQueryReader onPreset={handlePresetQuery} onTab={setActiveTab} />
       </Suspense>
 
       {/* Header */}
@@ -1067,7 +1182,19 @@ export default function WorkoutsPage() {
                   ) : (
                     <div>
                       <p className="font-medium">{entry.exercise_name}</p>
-                      <p className="text-sm text-[#555]">{entry.muscle_group}</p>
+                      <p className="text-sm text-[#555]">
+                        {entry.muscle_group}
+                        {(() => {
+                          // B1: "Last: 60kg × 8" hint pulled from history map
+                          const last = lastSetByExercise.get(entry.exercise_name)
+                          if (!last || (last.weight_kg ?? 0) <= 0) return null
+                          return (
+                            <span className="ml-2 text-blue-400/80 text-xs">
+                              · Last: {last.weight_kg} kg × {last.reps ?? '?'}
+                            </span>
+                          )
+                        })()}
+                      </p>
                     </div>
                   )}
                 </div>
@@ -1249,6 +1376,20 @@ export default function WorkoutsPage() {
 
             {expandedLog === log.id && log.exercise_logs && (
               <div className="mt-4 pt-4 border-t border-[#1e1e1e] space-y-3">
+                {/* B5: session totals — volume, sets, exercises */}
+                {(() => {
+                  const stats = computeVolumeStats(log.exercise_logs ?? [])
+                  if (stats.setCount === 0) return null
+                  return (
+                    <div className="flex items-center gap-4 text-xs text-[#888] px-1 -mt-1">
+                      <span><span className="text-white font-semibold">{stats.totalVolumeKg.toLocaleString()}</span> kg total volume</span>
+                      <span>·</span>
+                      <span><span className="text-white font-semibold">{stats.setCount}</span> sets</span>
+                      <span>·</span>
+                      <span><span className="text-white font-semibold">{stats.exerciseCount}</span> exercises</span>
+                    </div>
+                  )
+                })()}
                 {(() => {
                   const grouped: Record<string, ExerciseLog[]> = {}
                   log.exercise_logs.forEach(el => {

@@ -680,6 +680,28 @@ export default function LeaderboardDetailPage({ params }: { params: Promise<{ id
                     >
                       {rankAxis === 'total' ? '/ 100 ⓘ' : `${axisMeta[rankAxis].label} ⓘ`}
                     </button>
+                    {/* B2: gap-to-leader / lead-over-2nd hint, only on the user's own row */}
+                    {isMe && sortedRows.length > 1 && (() => {
+                      if (idx === 0) {
+                        const second = axisValue(sortedRows[1])
+                        const lead = axisValue(row) - second
+                        if (lead <= 0) return null
+                        return (
+                          <p className="text-[10px] text-emerald-400 mt-0.5">
+                            +{Math.round(lead * 10) / 10} ahead of #2
+                          </p>
+                        )
+                      } else {
+                        const leader = axisValue(sortedRows[0])
+                        const gap = leader - axisValue(row)
+                        if (gap <= 0) return null
+                        return (
+                          <p className="text-[10px] text-amber-400 mt-0.5">
+                            {Math.round(gap * 10) / 10} to catch leader
+                          </p>
+                        )
+                      }
+                    })()}
                   </div>
 
                   {open ? <ChevronUp className="w-4 h-4 text-[#444]" /> : <ChevronDown className="w-4 h-4 text-[#444]" />}
