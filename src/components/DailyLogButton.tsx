@@ -5,6 +5,7 @@ import { Plus, X, Flame, Dumbbell, Coffee, FileText, CheckCircle2, Loader2, Zap 
 import { createClient } from '@/lib/supabase'
 import type { DailyLog } from '@/lib/types'
 import { todayIsoLocal } from '@/lib/week'
+import { clampNumber, RANGES, trimToNullable } from '@/lib/validation'
 
 type FormState = {
   kcal_in:      number
@@ -98,11 +99,11 @@ export default function DailyLogButton() {
       const payload = {
         user_id:      user.id,
         date:         today,
-        kcal_in:      form.kcal_in,
-        kcal_burnt:   form.kcal_burnt,
+        kcal_in:      clampNumber(form.kcal_in,    RANGES.kcalIn,    0),
+        kcal_burnt:   clampNumber(form.kcal_burnt, RANGES.kcalBurnt, 0),
         workout_done: form.workout_done,
         is_rest_day:  form.is_rest_day,
-        notes:        form.notes || null,
+        notes:        trimToNullable(form.notes),
       }
 
       if (existing) {

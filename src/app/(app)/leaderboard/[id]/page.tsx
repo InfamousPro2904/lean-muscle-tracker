@@ -22,7 +22,7 @@ import {
 import { toIsoLocal, daysAgoIsoLocal } from '@/lib/week'
 import MemberSettingsModal from '@/components/leaderboard/MemberSettingsModal'
 import LeaderboardManageModal from '@/components/leaderboard/LeaderboardManageModal'
-import NotificationsPanel from '@/components/leaderboard/NotificationsPanel'
+import NotificationsPanel from '@/components/NotificationsPanel'
 import ScoreExplainerModal from '@/components/leaderboard/ScoreExplainerModal'
 import MyDailyLogsPanel from '@/components/leaderboard/MyDailyLogsPanel'
 

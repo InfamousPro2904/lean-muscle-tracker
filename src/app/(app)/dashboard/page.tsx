@@ -9,8 +9,9 @@ import {
   AlertCircle, Loader2
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase'
-import type { Profile, MealLog, WorkoutLog, ProgressLog, DailyLog } from '@/lib/types'
-import { getWeekStartIso, getWeekEndIso, todayIsoLocal, formatWeekRange } from '@/lib/week'
+import type { Profile, MealLog, WorkoutLog, ProgressLog, DailyLog, WorkoutRoutine, Badge } from '@/lib/types'
+import { getWeekStartIso, getWeekEndIso, todayIsoLocal, formatWeekRange, daysAgoIsoLocal } from '@/lib/week'
+import { calculateStreak, BADGE_DEFINITIONS } from '@/lib/scoring'
 import { MUSCLE_GROUPS as PRESET_GROUPS } from '@/lib/exercise-presets'
 import {
   LEAN_MUSCLE_ROUTINE_NAME,
@@ -255,6 +256,9 @@ export default function DashboardPage() {
   const [weekWorkouts, setWeekWorkouts] = useState<WorkoutLog[]>([])
   const [todayDailyLog, setTodayDailyLog] = useState<DailyLog | null>(null)
   const [weekDailyLogs, setWeekDailyLogs] = useState<DailyLog[]>([])
+  const [recentDailyLogs, setRecentDailyLogs] = useState<DailyLog[]>([])
+  const [todayRoutines, setTodayRoutines] = useState<WorkoutRoutine[]>([])
+  const [recentBadges, setRecentBadges] = useState<Badge[]>([])
   const [latestProgress, setLatestProgress] = useState<ProgressLog | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -279,7 +283,14 @@ export default function DashboardPage() {
     const weekStart = getWeekStartIso()
     const weekEnd   = getWeekEndIso(weekStart)
 
-    const [profileRes, todayMealsRes, weekMealsRes, workoutsRes, progressRes, todayDailyRes, weekDailyRes] = await Promise.all([
+    // Today's day-of-week index (0=Sun..6=Sat) — used to filter scheduled routines
+    const todayDow = new Date().getDay()
+    const ninetyAgo = daysAgoIsoLocal(90)
+
+    const [
+      profileRes, todayMealsRes, weekMealsRes, workoutsRes, progressRes,
+      todayDailyRes, weekDailyRes, recentDailyRes, routinesRes, badgesRes,
+    ] = await Promise.all([
       supabase.from('profiles').select('*').eq('id', user.id).single(),
       supabase.from('meal_logs').select('*').eq('user_id', user.id).eq('date', today),
       supabase.from('meal_logs').select('*').eq('user_id', user.id).gte('date', weekStart).lte('date', weekEnd),
@@ -289,6 +300,12 @@ export default function DashboardPage() {
         .order('date', { ascending: false }).limit(1).single(),
       supabase.from('daily_logs').select('*').eq('user_id', user.id).eq('date', today).maybeSingle(),
       supabase.from('daily_logs').select('*').eq('user_id', user.id).gte('date', weekStart).lte('date', weekEnd),
+      supabase.from('daily_logs').select('date').eq('user_id', user.id).gte('date', ninetyAgo),
+      supabase.from('workout_routines').select('*, routine_exercises(id)')
+        .eq('user_id', user.id).eq('is_active', true)
+        .contains('day_of_week', [todayDow]),
+      supabase.from('badges').select('*').eq('user_id', user.id)
+        .order('earned_at', { ascending: false }).limit(8),
     ])
 
     if (profileRes.data) setProfile(profileRes.data)
@@ -298,6 +315,9 @@ export default function DashboardPage() {
     if (progressRes.data) setLatestProgress(progressRes.data)
     if (todayDailyRes.data) setTodayDailyLog(todayDailyRes.data as DailyLog)
     if (weekDailyRes.data) setWeekDailyLogs(weekDailyRes.data as DailyLog[])
+    if (recentDailyRes.data) setRecentDailyLogs(recentDailyRes.data as DailyLog[])
+    if (routinesRes.data) setTodayRoutines(routinesRes.data as WorkoutRoutine[])
+    if (badgesRes.data) setRecentBadges(badgesRes.data as Badge[])
     setLoading(false)
   }, [supabase])
 
@@ -405,13 +425,89 @@ export default function DashboardPage() {
   return (
     <div className="max-w-5xl mx-auto space-y-8 pb-16">
 
-      {/* ── Header ── */}
-      <div>
-        <p className="text-xs text-[#555] uppercase tracking-widest mb-1 font-medium">{todayStr}</p>
-        <h1 className="text-2xl font-bold">
-          Welcome back, <span className="text-blue-400">{firstName}</span>
-        </h1>
+      {/* ── Header + streak ── */}
+      <div className="flex items-end justify-between gap-4 flex-wrap">
+        <div>
+          <p className="text-xs text-[#555] uppercase tracking-widest mb-1 font-medium">{todayStr}</p>
+          <h1 className="text-2xl font-bold">
+            Welcome back, <span className="text-blue-400">{firstName}</span>
+          </h1>
+        </div>
+        {(() => {
+          const streak = calculateStreak(recentDailyLogs)
+          if (streak === 0) return null
+          return (
+            <div className="flex items-center gap-2 px-3 py-2 rounded-2xl bg-orange-500/10 border border-orange-500/20">
+              <Flame className="w-5 h-5 text-orange-400" />
+              <div className="text-right">
+                <p className="text-lg font-bold text-orange-400 leading-none">{streak}</p>
+                <p className="text-[10px] text-[#777] mt-0.5">day streak</p>
+              </div>
+            </div>
+          )
+        })()}
       </div>
+
+      {/* ── Today's Routine (Phase 1.3) ── */}
+      {todayRoutines.length > 0 && (
+        <section className="card border-blue-500/20">
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div className="flex-1 min-w-0">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-blue-400 mb-1.5">
+                Today&apos;s Plan · {new Date().toLocaleDateString('en-US', { weekday: 'long' })}
+              </p>
+              <div className="space-y-2">
+                {todayRoutines.map(r => {
+                  const exCount = (r as WorkoutRoutine & { routine_exercises?: { id: string }[] }).routine_exercises?.length ?? 0
+                  return (
+                    <div key={r.id} className="flex items-center gap-3">
+                      <Dumbbell className="w-4 h-4 text-blue-400 shrink-0" />
+                      <p className="text-sm font-semibold flex-1 truncate">{r.name}</p>
+                      <p className="text-[11px] text-[#666] shrink-0">{exCount} ex</p>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+            <Link
+              href="/workouts?tab=log"
+              className="btn-primary text-xs flex items-center gap-1.5 shrink-0"
+            >
+              <Plus className="w-3.5 h-3.5" /> Start Workout
+            </Link>
+          </div>
+        </section>
+      )}
+
+      {/* ── Recent Badges (Phase 1.4) ── */}
+      {recentBadges.length > 0 && (
+        <section>
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-[#666] mb-2">
+            Recent Badges
+          </p>
+          <div className="flex gap-2 overflow-x-auto pb-2 -mx-1 px-1">
+            {recentBadges.map(b => {
+              const def = BADGE_DEFINITIONS[b.badge_type as keyof typeof BADGE_DEFINITIONS]
+              if (!def) return null
+              return (
+                <div
+                  key={b.id}
+                  title={def.description}
+                  className="flex items-center gap-2 px-3 py-2 bg-[#161616] border border-[#222] rounded-xl shrink-0"
+                >
+                  <span className="text-base">{def.emoji}</span>
+                  <div>
+                    <p className="text-xs font-medium text-white whitespace-nowrap">{def.label}</p>
+                    <p className="text-[10px] text-[#555]">
+                      {new Date(b.earned_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                    </p>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
 
       {/* ── Quick stat cards ── */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">

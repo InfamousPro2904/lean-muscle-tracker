@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef, Suspense } from 'react'
+import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase'
 import {
@@ -112,6 +113,9 @@ export default function WorkoutsPage() {
   const [expandedLog, setExpandedLog] = useState<string | null>(null)
   const [historyView, setHistoryView] = useState<'list' | 'weeks'>('weeks')
   const [collapsedWeeks, setCollapsedWeeks] = useState<Set<string>>(new Set())
+
+  // ─── Post-workout refuel toast (Phase 1.1) ───
+  const [refuelToast, setRefuelToast] = useState<{ kcal: number } | null>(null)
 
   // ─── Delete confirmation + undo ───
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
@@ -603,6 +607,12 @@ export default function WorkoutsPage() {
     setLogDate(todayIsoLocal()); setLogDuration('')
     setLogNotes(''); setExerciseEntries([]); setIsRestDay(false)
     setSavingLog(false); fetchHistory(); setActiveTab('history')
+
+    // Fire the refuel toast (auto-dismisses after 7 s)
+    if (estimatedKcal > 0) {
+      setRefuelToast({ kcal: estimatedKcal })
+      setTimeout(() => setRefuelToast(null), 7000)
+    }
   }
 
   const confirmDeleteLog = (log: WorkoutLog) => {
@@ -1307,9 +1317,16 @@ export default function WorkoutsPage() {
             )}
 
             {workoutLogs.length === 0 ? (
-              <div className="card text-center py-12">
-                <History className="w-12 h-12 text-[#333] mx-auto mb-3" />
-                <p className="text-[#555]">No workouts logged yet. Hit the gym and come back!</p>
+              <div className="card text-center py-14 space-y-3">
+                <div className="w-14 h-14 rounded-2xl bg-blue-500/10 flex items-center justify-center mx-auto">
+                  <Dumbbell className="w-7 h-7 text-blue-400" />
+                </div>
+                <div>
+                  <p className="font-semibold">No workouts logged yet</p>
+                  <p className="text-xs text-[#666] mt-1">
+                    Pick a routine in the Log Workout tab or browse the AI Planner from your dashboard.
+                  </p>
+                </div>
               </div>
             ) : historyView === 'list' ? (
               workoutLogs.map(renderLogCard)
@@ -1365,6 +1382,33 @@ export default function WorkoutsPage() {
           countdown={undoPending.countdown}
           onUndo={handleUndo}
         />
+      )}
+
+      {/* ═══════════════════ REFUEL TOAST (Phase 1.1) ═══════════════════ */}
+      {refuelToast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[min(420px,90vw)] bg-[#0e0e0e] border border-orange-500/30 rounded-2xl shadow-2xl px-4 py-3 flex items-center gap-3 animate-in slide-in-from-bottom-3">
+          <div className="w-10 h-10 rounded-xl bg-orange-500/15 flex items-center justify-center shrink-0">
+            <Flame className="w-5 h-5 text-orange-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold">Just burnt ≈ {refuelToast.kcal} kcal</p>
+            <p className="text-[11px] text-[#777] mt-0.5">Refuel within 2 hours for best recovery.</p>
+          </div>
+          <Link
+            href={`/diet?meal_type=Post-Workout&kcal_burnt=${refuelToast.kcal}&suggest_protein=1`}
+            onClick={() => setRefuelToast(null)}
+            className="btn-primary text-xs py-1.5 px-3 shrink-0 flex items-center gap-1"
+          >
+            Log meal →
+          </Link>
+          <button
+            onClick={() => setRefuelToast(null)}
+            className="text-[#555] hover:text-white p-1"
+            aria-label="Dismiss"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
       )}
     </div>
   )

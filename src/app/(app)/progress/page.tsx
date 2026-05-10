@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { createClient } from '@/lib/supabase'
 import { ProgressLog } from '@/lib/types'
 import { todayIsoLocal, toIsoLocal } from '@/lib/week'
+import { clampNumber, parseOptionalNumber, RANGES, trimToNullable } from '@/lib/validation'
 import {
   TrendingUp,
   TrendingDown,
@@ -84,21 +85,35 @@ export default function ProgressPage() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) throw new Error('Not authenticated')
 
+      // Validate + clamp every numeric input before hitting the DB
+      const cleanWeight = clampNumber(weightKg, RANGES.bodyWeightKg)
+
       const { error } = await supabase.from('progress_logs').insert({
         user_id: user.id,
         date,
-        weight_kg: parseFloat(weightKg),
-        body_fat_pct: bodyFatPct ? parseFloat(bodyFatPct) : null,
-        chest_cm: chestCm ? parseFloat(chestCm) : null,
-        waist_cm: waistCm ? parseFloat(waistCm) : null,
-        arms_cm: armsCm ? parseFloat(armsCm) : null,
-        thighs_cm: thighsCm ? parseFloat(thighsCm) : null,
-        notes: notes || null,
+        weight_kg:    cleanWeight,
+        body_fat_pct: parseOptionalNumber(bodyFatPct, RANGES.bodyFatPct),
+        chest_cm:     parseOptionalNumber(chestCm,    RANGES.measurementCm),
+        waist_cm:     parseOptionalNumber(waistCm,    RANGES.measurementCm),
+        arms_cm:      parseOptionalNumber(armsCm,     RANGES.measurementCm),
+        thighs_cm:    parseOptionalNumber(thighsCm,   RANGES.measurementCm),
+        notes:        trimToNullable(notes),
       })
 
       if (error) throw error
 
-      setSuccess('Progress saved!')
+      // ── Phase 1.2 — Cross-feature sync ──────────────────────────────
+      // Propagate the new weight to:
+      //   1. profiles.weight_kg (used for kcal estimation, dashboard card, TDEE)
+      //   2. all this user's leaderboard_members.current_weight_kg (so scoring
+      //      reflects the latest weight without a manual update)
+      // Fire in parallel; failures shouldn't block the main save.
+      await Promise.all([
+        supabase.from('profiles').update({ weight_kg: cleanWeight }).eq('id', user.id),
+        supabase.from('leaderboard_members').update({ current_weight_kg: cleanWeight }).eq('user_id', user.id),
+      ])
+
+      setSuccess('✓ Progress saved · profile + leaderboards updated')
       setWeightKg('')
       setBodyFatPct('')
       setChestCm('')
@@ -797,14 +812,16 @@ export default function ProgressPage() {
 
       {/* Empty state */}
       {logs.length === 0 && !loading && (
-        <div className="card text-center py-12">
-          <Scale className="w-12 h-12 text-gray-600 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-gray-400 mb-2">
-            No progress logged yet
-          </h3>
-          <p className="text-gray-600">
-            Start tracking your body weight and measurements above.
-          </p>
+        <div className="card text-center py-14 space-y-3">
+          <div className="w-14 h-14 rounded-2xl bg-blue-500/10 flex items-center justify-center mx-auto">
+            <Scale className="w-7 h-7 text-blue-400" />
+          </div>
+          <div>
+            <p className="font-semibold">No progress logged yet</p>
+            <p className="text-xs text-[#666] mt-1 max-w-sm mx-auto">
+              Step on the scale once a week — small data unlocks big insights. Your weight auto-syncs to your dashboard, profile, and leaderboards.
+            </p>
+          </div>
         </div>
       )}
     </div>

@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, Suspense } from 'react'
+import { useSearchParams, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase'
 import { MealLog, Profile, MEAL_TYPES, MealTemplate, BasketItem, Macros100g } from '@/lib/types'
 import { QUICK_FOODS, searchFoods, type FoodItem } from '@/lib/foods'
@@ -115,6 +116,28 @@ function genId(): string {
   return Math.random().toString(36).slice(2)
 }
 
+// ── Suspense-wrapped query-param reader (post-workout deep-link) ────────────
+// Receives a callback invoked once with the parsed query, then clears the URL
+// so refreshing the page doesn't re-trigger the banner.
+function DietQueryReader({
+  onWorkoutDeepLink,
+}: {
+  onWorkoutDeepLink: (mealType: string | null, kcalBurnt: number, suggestProtein: boolean) => void
+}) {
+  const searchParams = useSearchParams()
+  const router       = useRouter()
+  useEffect(() => {
+    const mealType   = searchParams.get('meal_type')
+    const kcalBurnt  = Number(searchParams.get('kcal_burnt') ?? 0)
+    const suggestPro = searchParams.get('suggest_protein') === '1'
+    if (mealType || kcalBurnt > 0 || suggestPro) {
+      onWorkoutDeepLink(mealType, kcalBurnt, suggestPro)
+      router.replace('/diet')  // strip query so banner doesn't reappear on refresh
+    }
+  }, [searchParams, router, onWorkoutDeepLink])
+  return null
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface MealForm {
@@ -178,6 +201,19 @@ export default function DietPage() {
   // Inline edit of a basket item / template
   const [editingBasketId,  setEditingBasketId]  = useState<string | null>(null)
   const [editingTemplate,  setEditingTemplate]  = useState<MealTemplate | null>(null)
+
+  // Post-workout deep-link banner state (Phase 1.1)
+  const [postWorkout, setPostWorkout] = useState<{ kcalBurnt: number } | null>(null)
+
+  const handleWorkoutDeepLink = useCallback((mealType: string | null, kcalBurnt: number, suggestProtein: boolean) => {
+    if (mealType && (MEAL_TYPES as readonly string[]).includes(mealType)) {
+      setMealType(mealType)
+    }
+    if (suggestProtein || kcalBurnt > 0) {
+      setPostWorkout({ kcalBurnt })
+      setLogMode('search')
+    }
+  }, [])
 
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -334,6 +370,12 @@ export default function DietPage() {
         setSearchLoading(false)
       }
     }, 400)
+
+    // Cleanup: clear the pending timeout if the user types again or the
+    // component unmounts (prevents stale state writes + memory leaks)
+    return () => {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
+    }
   }, [searchQuery])
 
   // ── Basket management ───────────────────────────────────────────────────
@@ -725,6 +767,10 @@ export default function DietPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8 space-y-8">
+      <Suspense fallback={null}>
+        <DietQueryReader onWorkoutDeepLink={handleWorkoutDeepLink} />
+      </Suspense>
+
       {/* Page Header */}
       <div className="flex items-center gap-3">
         <div className="bg-green-500/10 p-2.5 rounded-xl">
@@ -735,6 +781,30 @@ export default function DietPage() {
           <p className="text-gray-500 text-sm">Track meals & hit your macros</p>
         </div>
       </div>
+
+      {/* Post-workout refuel banner (Phase 1.1) */}
+      {postWorkout && (
+        <div className="bg-emerald-500/8 border border-emerald-500/25 rounded-2xl p-4 flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-emerald-500/15 flex items-center justify-center shrink-0">
+            <Zap className="w-5 h-5 text-emerald-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-emerald-400">
+              Post-workout refuel · ≈ {postWorkout.kcalBurnt} kcal burnt
+            </p>
+            <p className="text-[11px] text-[#888] mt-0.5">
+              Eat 30–40 g protein within 2 hours for best recovery. Try chicken, paneer, eggs, whey, Greek yogurt.
+            </p>
+          </div>
+          <button
+            onClick={() => setPostWorkout(null)}
+            className="text-[#555] hover:text-white p-1"
+            aria-label="Dismiss"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* ── Daily Summary ─────────────────────────────────────────────── */}
       <section className="card space-y-6">
@@ -1284,8 +1354,16 @@ export default function DietPage() {
         {loading ? (
           <div className="card text-center py-12 text-gray-500">Loading meals...</div>
         ) : Object.keys(grouped).length === 0 ? (
-          <div className="card text-center py-12 text-gray-500">
-            No meals logged for this day. Add your first meal above.
+          <div className="card text-center py-14 space-y-3">
+            <div className="w-14 h-14 rounded-2xl bg-green-500/10 flex items-center justify-center mx-auto">
+              <UtensilsCrossed className="w-7 h-7 text-green-500" />
+            </div>
+            <div>
+              <p className="font-semibold">Nothing logged yet</p>
+              <p className="text-xs text-[#666] mt-1">
+                Search a food (try &quot;dal&quot; or &quot;banana&quot;) or pick from Quick Foods above 👆
+              </p>
+            </div>
           </div>
         ) : (
           Object.entries(grouped).map(([type, groups]) => {

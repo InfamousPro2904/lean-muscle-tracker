@@ -8,6 +8,7 @@ import {
   LayoutDashboard, User, LogOut, Menu, X, BookOpen, MessageSquare, Trophy
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase'
+import NotificationsPanel from '@/components/NotificationsPanel'
 
 const NAV_ITEMS = [
   { href: '/dashboard',    label: 'Dashboard',    icon: LayoutDashboard },
@@ -35,14 +36,17 @@ export default function Navbar() {
     <>
       {/* ── Desktop sidebar ── */}
       <nav className="hidden md:flex flex-col w-64 min-h-screen bg-[#0d0d0d] border-r border-[#1a1a1a] p-5 fixed left-0 top-0 z-30">
-        {/* Brand */}
+        {/* Brand + global notifications bell */}
         <div className="flex items-center gap-3 mb-8 px-2">
           <div className="w-9 h-9 rounded-xl bg-blue-500/15 flex items-center justify-center shrink-0">
             <Dumbbell className="w-5 h-5 text-blue-400" />
           </div>
-          <div>
+          <div className="flex-1 min-w-0">
             <h1 className="font-bold text-[15px] tracking-tight text-white">Workout Routine</h1>
             <p className="text-[11px] text-[#444] mt-0.5">Training System</p>
+          </div>
+          <div className="shrink-0">
+            <NotificationsPanel />
           </div>
         </div>
 
@@ -131,12 +135,15 @@ export default function Navbar() {
           </div>
           <span className="font-bold text-sm tracking-tight">Workout Routine</span>
         </div>
-        <button
-          onClick={() => setMobileOpen(!mobileOpen)}
-          className="text-[#555] hover:text-white transition-colors p-1"
-        >
-          {mobileOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-        </button>
+        <div className="flex items-center gap-1">
+          <NotificationsPanel />
+          <button
+            onClick={() => setMobileOpen(!mobileOpen)}
+            className="text-[#555] hover:text-white transition-colors p-1"
+          >
+            {mobileOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+          </button>
+        </div>
       </div>
 
       {/* ── Mobile menu ── */}

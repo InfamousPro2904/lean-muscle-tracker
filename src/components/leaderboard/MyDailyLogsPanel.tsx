@@ -5,6 +5,7 @@ import { Edit3, Trash2, Save, Loader2, Coffee, Dumbbell } from 'lucide-react'
 import { createClient } from '@/lib/supabase'
 import type { DailyLog } from '@/lib/types'
 import { toIsoLocal, todayIsoLocal, daysAgoIsoLocal } from '@/lib/week'
+import { clampNumber, RANGES, trimToNullable } from '@/lib/validation'
 
 interface Props {
   weekStart: string  // ISO date YYYY-MM-DD
@@ -80,11 +81,11 @@ export default function MyDailyLogsPanel({ weekStart, weekEnd: _weekEnd, logs, o
       const payload = {
         user_id:      user.id,
         date:         editingDate,
-        kcal_in:      Number(editForm.kcal_in)    || 0,
-        kcal_burnt:   Number(editForm.kcal_burnt) || 0,
+        kcal_in:      clampNumber(editForm.kcal_in,    RANGES.kcalIn,    0),
+        kcal_burnt:   clampNumber(editForm.kcal_burnt, RANGES.kcalBurnt, 0),
         workout_done: editForm.workout_done,
         is_rest_day:  editForm.is_rest_day,
-        notes:        editForm.notes.trim() || null,
+        notes:        trimToNullable(editForm.notes),
       }
 
       if (cell?.log) {

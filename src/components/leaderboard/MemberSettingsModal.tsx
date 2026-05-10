@@ -7,6 +7,7 @@ import { createClient } from '@/lib/supabase'
 import type { LeaderboardMember, GoalType, ActivityLevel } from '@/lib/types'
 import { GOAL_LABELS, ACTIVITY_LABELS } from '@/lib/scoring'
 import { backfillDailyLogs, type BackfillResult } from '@/lib/backfill'
+import { parseOptionalNumber, RANGES } from '@/lib/validation'
 
 interface Props {
   member:    LeaderboardMember
@@ -36,17 +37,37 @@ export default function MemberSettingsModal({ member, onClose, onUpdated }: Prop
     setSaving(true)
     setError('')
     try {
+      // Validate + clamp every numeric weight to a sensible range
+      const cleanCurrent = parseOptionalNumber(currentWeight, RANGES.bodyWeightKg)
+      const cleanTarget  = parseOptionalNumber(targetWeight,  RANGES.bodyWeightKg)
+      const cleanStart   = parseOptionalNumber(startWeight,   RANGES.bodyWeightKg)
+
       const { error: err } = await supabase
         .from('leaderboard_members')
         .update({
           goal_type:         goalType,
           activity_level:    activityLevel,
-          current_weight_kg: parseFloat(currentWeight) || null,
-          target_weight_kg:  parseFloat(targetWeight)  || null,
-          start_weight_kg:   parseFloat(startWeight)   || null,
+          current_weight_kg: cleanCurrent,
+          target_weight_kg:  cleanTarget,
+          start_weight_kg:   cleanStart,
         })
         .eq('id', member.id)
       if (err) throw err
+
+      // Cross-feature reverse-sync (Phase 1.2): if current weight changed,
+      // mirror it to profiles.weight_kg so dashboard, kcal estimation, and
+      // other leaderboards stay consistent.
+      if (cleanCurrent && cleanCurrent !== member.current_weight_kg) {
+        const { data: { user } } = await supabase.auth.getUser()
+        if (user) {
+          await supabase.from('profiles').update({ weight_kg: cleanCurrent }).eq('id', user.id)
+          await supabase.from('leaderboard_members')
+            .update({ current_weight_kg: cleanCurrent })
+            .eq('user_id', user.id)
+            .neq('id', member.id)
+        }
+      }
+
       onUpdated()
       onClose()
     } catch (err) {
