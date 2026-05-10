@@ -220,12 +220,21 @@ export default function DietPage() {
   }, [])
 
   // ─── C3: Persist basket to localStorage scoped by date ──────────────────
-  // Hydrate once on mount; persist on every basket change. Cleared after
-  // logging or when the date changes (yesterday's basket shouldn't appear).
+  // Hydrate when date changes; persist on every basket change. Date changes
+  // ALWAYS reset the basket first (otherwise yesterday's basket would leak
+  // into today's localStorage key).
   const basketKey = `diet_basket_${formatDate(selectedDate)}`
-  // Hydrate
+  const previousKeyRef = useRef<string>(basketKey)
+  // Hydrate (and reset on date change)
   useEffect(() => {
     if (typeof window === 'undefined') return
+    const dateChanged = previousKeyRef.current !== basketKey
+    if (dateChanged) {
+      // Clear in-memory basket BEFORE hydrating new key — otherwise the
+      // persist-effect will write the old basket under the new key.
+      setBasket([])
+      previousKeyRef.current = basketKey
+    }
     try {
       const raw = window.localStorage.getItem(basketKey)
       if (!raw) return
@@ -237,6 +246,17 @@ export default function DietPage() {
     } catch {
       // bad JSON — ignore
     }
+    // Cleanup: opportunistically prune basket entries older than 3 days.
+    try {
+      const cutoff = Date.now() - 3 * 86400_000
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const k = window.localStorage.key(i)
+        if (!k || !k.startsWith('diet_basket_')) continue
+        const dateStr = k.replace('diet_basket_', '')
+        const t = new Date(dateStr + 'T12:00:00').getTime()
+        if (isFinite(t) && t < cutoff) window.localStorage.removeItem(k)
+      }
+    } catch { /* localStorage may be disabled */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [basketKey])
   // Persist

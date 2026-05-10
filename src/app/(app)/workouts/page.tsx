@@ -285,31 +285,40 @@ export default function WorkoutsPage() {
       )
       setWorkoutLogs(logsWithExercises)
 
-      // Build last-session map for A1 auto-fill and B1 hints.
-      // Walk from newest → oldest; first match wins for each exercise name.
-      // Within the same session, prefer the heaviest set (best signal).
-      const lastMap = new Map<string, { reps: number | null; weight_kg: number | null; date: string }>()
+      // Build "best recent" map for A1 auto-fill and B1 hints.
+      // Use the HEAVIEST set in the last 28 days for each exercise — this
+      // protects against a deload-week regression (last session 60% load
+      // shouldn't reset the user's progression). Falls back to all-time
+      // best if user has no entries in the last 28 days.
+      const TWENTY_EIGHT_DAYS = 28 * 86400_000
+      const cutoffDate = new Date(Date.now() - TWENTY_EIGHT_DAYS)
+      const cutoffIso  = `${cutoffDate.getFullYear()}-${String(cutoffDate.getMonth() + 1).padStart(2, '0')}-${String(cutoffDate.getDate()).padStart(2, '0')}`
+
+      const recentMap = new Map<string, { reps: number | null; weight_kg: number | null; date: string }>()
+      const allTimeMap = new Map<string, { reps: number | null; weight_kg: number | null; date: string }>()
+
       for (const log of logsWithExercises) {
-        const allSets: ExerciseLog[] = log.exercise_logs ?? []
-        for (const e of allSets) {
-          if (lastMap.has(e.exercise_name)) continue
-          // For the most recent session featuring this exercise, find the
-          // heaviest set so the hint reflects the user's working set.
-          const sameExerciseSets: ExerciseLog[] = allSets.filter(s => s.exercise_name === e.exercise_name)
-          let heaviest: ExerciseLog | null = null
-          for (const cur of sameExerciseSets) {
-            const w = cur.weight_kg ?? 0
-            if (!heaviest || w > (heaviest.weight_kg ?? 0)) heaviest = cur
+        const recent = log.date >= cutoffIso
+        for (const e of (log.exercise_logs ?? []) as ExerciseLog[]) {
+          const w = e.weight_kg ?? 0
+          if (w <= 0) continue
+          const target = recent ? recentMap : allTimeMap
+          const cur = target.get(e.exercise_name)
+          if (!cur || w > (cur.weight_kg ?? 0)) {
+            target.set(e.exercise_name, { reps: e.reps, weight_kg: e.weight_kg, date: log.date })
           }
-          if (heaviest) {
-            lastMap.set(e.exercise_name, {
-              reps:      heaviest.reps,
-              weight_kg: heaviest.weight_kg,
-              date:      log.date,
-            })
+          // Also seed allTimeMap from recent entries so fallback works
+          if (recent) {
+            const a = allTimeMap.get(e.exercise_name)
+            if (!a || w > (a.weight_kg ?? 0)) {
+              allTimeMap.set(e.exercise_name, { reps: e.reps, weight_kg: e.weight_kg, date: log.date })
+            }
           }
         }
       }
+      // Final map: prefer recent, fall back to all-time
+      const lastMap = new Map(allTimeMap)
+      for (const [k, v] of recentMap) lastMap.set(k, v)
       setLastSetByExercise(lastMap)
     }
   }, [userId, supabase])
@@ -344,6 +353,25 @@ export default function WorkoutsPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, routines, selectedRoutineId, exerciseEntries.length])
+
+  // ─── AUDIT FIX (A1 race): if a routine was selected before the history
+  // map populated, retroactively fill weights once the map arrives. Only
+  // touches sets that are still null — never overwrites user-entered data.
+  useEffect(() => {
+    if (!selectedRoutineId) return
+    if (lastSetByExercise.size === 0) return
+    setExerciseEntries(prev => prev.map(entry => {
+      const last = lastSetByExercise.get(entry.exercise_name)
+      if (!last || (last.weight_kg ?? 0) <= 0) return entry
+      const allSetsNull = entry.sets.every(s => s.weight_kg == null)
+      if (!allSetsNull) return entry  // user has typed something — leave alone
+      return {
+        ...entry,
+        sets: entry.sets.map(s => ({ ...s, weight_kg: last.weight_kg })),
+      }
+    }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastSetByExercise, selectedRoutineId])
 
   // ─── Undo helpers ───
   const clearUndoTimers = () => {
@@ -679,17 +707,16 @@ export default function WorkoutsPage() {
       const newSets = exerciseEntries.flatMap(e =>
         e.sets.map(s => ({ exercise_name: e.exercise_name, reps: s.reps, weight_kg: s.weight_kg }))
       )
-      // Only fetch history that's relevant (last 6 months) to keep payload small
-      const sixMonthsAgo = (() => {
-        const d = new Date(); d.setMonth(d.getMonth() - 6)
-        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-      })()
+      // Pull ALL prior history — PRs are infrequent events; capping the
+      // window means a 1-year-old PR could be "broken" by a sub-PR set today.
+      // Restricted by exercise names from this session for payload bound.
+      const exerciseNames = Array.from(new Set(exerciseEntries.map(e => e.exercise_name)))
       const { data: priorLogs } = await supabase
         .from('workout_logs')
-        .select('id, date, exercise_logs(exercise_name, reps, weight_kg)')
+        .select('id, date, exercise_logs!inner(exercise_name, reps, weight_kg)')
         .eq('user_id', userId)
-        .lt('date', logDate)  // strict less-than: don't include today's session
-        .gte('date', sixMonthsAgo)
+        .lt('date', logDate)
+        .in('exercise_logs.exercise_name', exerciseNames)
 
       const flatPrior: Array<{ exercise_name: string; reps: number | null; weight_kg: number | null; date: string }> = []
       for (const wl of (priorLogs ?? []) as Array<{ date: string; exercise_logs?: Array<{ exercise_name: string; reps: number | null; weight_kg: number | null }> }>) {

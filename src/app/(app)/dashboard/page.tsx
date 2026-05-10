@@ -706,12 +706,17 @@ export default function DashboardPage() {
         const deltaActive   = computeDelta(activeDates.size, lwActive.size)
 
         type DeltaCell = { current: number; trend: 'up' | 'down' | 'flat'; diff: number }
-        const renderDelta = (d: DeltaCell, positiveIsGood: boolean, suffix = '') => {
+        // direction = 'positive_good' | 'negative_good' | 'neutral'
+        // 'neutral' renders gray arrows (e.g. kcal_in — direction depends on
+        // user's cut/bulk goal which we don't reliably know from dashboard).
+        type DeltaDirection = 'positive_good' | 'negative_good' | 'neutral'
+        const renderDelta = (d: DeltaCell, dir: DeltaDirection, suffix = '') => {
           if (d.trend === 'flat') return <span className="text-[#555]">→ same as last week</span>
-          const isGood = positiveIsGood ? d.trend === 'up' : d.trend === 'down'
-          const color = isGood ? 'text-emerald-400' : 'text-red-400'
           const arrow = d.trend === 'up' ? '↑' : '↓'
           const abs = Math.abs(d.diff)
+          let color = 'text-[#888]'
+          if (dir === 'positive_good') color = d.trend === 'up'   ? 'text-emerald-400' : 'text-red-400'
+          if (dir === 'negative_good') color = d.trend === 'down' ? 'text-emerald-400' : 'text-red-400'
           return <span className={color}>{arrow} {abs}{suffix} vs last week</span>
         }
 
@@ -731,24 +736,24 @@ export default function DashboardPage() {
               <div className="bg-[#0e0e0e] rounded-xl p-3 text-center">
                 <p className="text-[10px] text-[#666] uppercase tracking-wider mb-1">Workouts</p>
                 <p className="text-2xl font-bold">{weekWorkouts.length}</p>
-                <p className="text-[10px]">{renderDelta(deltaWorkouts, true)}</p>
+                <p className="text-[10px]">{renderDelta(deltaWorkouts, 'positive_good')}</p>
               </div>
               <div className="bg-[#0e0e0e] rounded-xl p-3 text-center">
                 <p className="text-[10px] text-[#666] uppercase tracking-wider mb-1">Burnt</p>
                 <p className="text-2xl font-bold text-emerald-400">{totalKcalOut}</p>
-                <p className="text-[10px]">{renderDelta(deltaBurnt, true, ' kcal')}</p>
+                <p className="text-[10px]">{renderDelta(deltaBurnt, 'positive_good', ' kcal')}</p>
               </div>
               <div className="bg-[#0e0e0e] rounded-xl p-3 text-center">
                 <p className="text-[10px] text-[#666] uppercase tracking-wider mb-1">Calories in</p>
                 <p className="text-2xl font-bold text-orange-400">{totalKcalIn}</p>
                 <p className="text-[10px] text-[#555]">{avgDailyKcal > 0 ? `avg ${avgDailyKcal}/day` : 'kcal'}</p>
-                <p className="text-[10px] mt-0.5">{renderDelta(deltaIn, true, ' kcal')}</p>
+                <p className="text-[10px] mt-0.5">{renderDelta(deltaIn, 'neutral', ' kcal')}</p>
               </div>
               <div className="bg-[#0e0e0e] rounded-xl p-3 text-center">
                 <p className="text-[10px] text-[#666] uppercase tracking-wider mb-1">Active days</p>
                 <p className="text-2xl font-bold text-blue-400">{activeDates.size}</p>
                 <p className="text-[10px] text-[#555]">/ {dayOfWeek} so far</p>
-                <p className="text-[10px] mt-0.5">{renderDelta(deltaActive, true)}</p>
+                <p className="text-[10px] mt-0.5">{renderDelta(deltaActive, 'positive_good')}</p>
               </div>
             </div>
           </section>
